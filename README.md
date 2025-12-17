@@ -1,63 +1,80 @@
 # DistX
 
-A simple, fast, in-memory vector database written in Rust. Designed with Redis-style simplicity and Qdrant API compatibility.
+[![Crates.io](https://img.shields.io/crates/v/distx.svg)](https://crates.io/crates/distx)
+[![Documentation](https://docs.rs/distx/badge.svg)](https://docs.rs/distx)
+[![License](https://img.shields.io/crates/l/distx.svg)](https://github.com/antonellof/DistX#license)
 
-DistX combines the best of both worlds: **Redis's simple architecture and performance** with **Qdrant's easy-to-use API**. It's faster than Redis (26x faster inserts, 1.35x faster searches) while maintaining the same in-memory, fork-based persistence model. The Qdrant-compatible REST API makes it a drop-in replacement for existing applications.
+A fast, in-memory vector database written in Rust. Designed with Redis-style simplicity and Qdrant API compatibility.
 
-## What is DistX?
+## Performance
 
-DistX is an in-memory vector database that provides fast similarity search using HNSW indexing. It offers a simple API compatible with Qdrant, making it easy to migrate existing applications.
+**DistX beats both Qdrant and Redis on insert AND search operations:**
 
-## Features
+| Protocol | vs Qdrant | vs Redis |
+|----------|-----------|----------|
+| **Insert (gRPC)** | 4.5x faster | 10x faster |
+| **Search (gRPC)** | 6.3x faster | 5x faster |
+| **Search Latency** | 6.6x lower | 5x lower |
 
-- **Fast Vector Search**: HNSW index for approximate nearest neighbor search
-- **Text Search**: BM25 full-text search with ranking
-- **Payload Filtering**: Filter results by JSON metadata
-- **Graph Support**: Basic nodes and edges
-- **Dual API**: REST (Qdrant-compatible) and gRPC APIs
-- **Persistence**: Redis-style snapshots, WAL, and LMDB storage
-- **In-Memory First**: Optimized for speed with optional persistence
+See [Performance Benchmarks](documentation/PERFORMANCE.md) for detailed results.
 
-## Getting Started
+## Installation
+
+### From crates.io
+
+```bash
+cargo install distx
+```
+
+### As a Library
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+distx = "0.1.0"
+
+# Or individual components:
+distx-core = "0.1.0"      # Core data structures (Vector, HNSW, BM25)
+distx-storage = "0.1.0"   # Persistence layer (WAL, snapshots)
+distx-api = "0.1.0"       # REST and gRPC APIs
+```
+
+### From Source
+
+```bash
+git clone https://github.com/antonellof/DistX.git
+cd DistX
+cargo build --release
+```
 
 ### Prerequisites
 
-- **Rust**: Install from [rustup.rs](https://rustup.rs/)
+- **Rust 1.75+**: Install from [rustup.rs](https://rustup.rs/)
 - **LMDB** (for persistence):
   - Linux: `sudo apt-get install liblmdb-dev`
   - macOS: `brew install lmdb`
 
-### Build from Source
-
-```bash
-git clone https://github.com/antonellof/DistX.git
-cd distx
-cargo build --release
-```
-
-The binary will be at `target/release/distx`.
+## Quick Start
 
 ### Run the Server
 
-Start DistX with default settings:
-
 ```bash
+# Using cargo install
+distx
+
+# Or from source
 ./target/release/distx
-```
 
-Or with custom options:
-
-```bash
-./target/release/distx --data-dir ./data --http-port 6333 --grpc-port 6334
+# With custom options
+distx --data-dir ./data --http-port 6333 --grpc-port 6334
 ```
 
 The server will start and listen on:
-- HTTP API: `http://localhost:6333`
-- gRPC API: `localhost:6334`
+- **REST API**: `http://localhost:6333` (Qdrant-compatible)
+- **gRPC API**: `localhost:6334`
 
-### Quick Example
-
-#### 1. Create a Collection
+### Create a Collection
 
 ```bash
 curl -X PUT http://localhost:6333/collections/my_collection \
@@ -70,7 +87,7 @@ curl -X PUT http://localhost:6333/collections/my_collection \
   }'
 ```
 
-#### 2. Insert Vectors
+### Insert Vectors
 
 ```bash
 curl -X PUT http://localhost:6333/collections/my_collection/points \
@@ -79,46 +96,34 @@ curl -X PUT http://localhost:6333/collections/my_collection/points \
     "points": [
       {
         "id": "point1",
-        "vector": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "vector": [0.1, 0.2, 0.3, ...],
         "payload": {"text": "example document"}
-      },
-      {
-        "id": "point2",
-        "vector": [0.2, 0.3, 0.4, 0.5, 0.6],
-        "payload": {"text": "another document"}
       }
     ]
   }'
 ```
 
-#### 3. Search Vectors
+### Search Vectors
 
 ```bash
 curl -X POST http://localhost:6333/collections/my_collection/points/search \
   -H "Content-Type: application/json" \
   -d '{
-    "vector": [0.1, 0.2, 0.3, 0.4, 0.5],
+    "vector": [0.1, 0.2, 0.3, ...],
     "limit": 10
   }'
 ```
 
-#### 4. Get a Point
+## Features
 
-```bash
-curl http://localhost:6333/collections/my_collection/points/point1
-```
-
-#### 5. Delete a Point
-
-```bash
-curl -X DELETE http://localhost:6333/collections/my_collection/points/point1
-```
-
-For more examples and detailed API documentation, see [Quick Start Guide](documentation/QUICK_START.md).
+- **Fast Vector Search**: HNSW index with SIMD optimizations (AVX2, SSE, NEON)
+- **Text Search**: BM25 full-text search with ranking
+- **Payload Filtering**: Filter results by JSON metadata
+- **Dual API**: REST (Qdrant-compatible) and gRPC
+- **Persistence**: Redis-style snapshots, WAL, and LMDB storage
+- **Lightweight**: Single ~6MB binary
 
 ## Configuration
-
-Command line options:
 
 ```bash
 distx [OPTIONS]
@@ -142,26 +147,24 @@ distx/
     └── main.rs        # Main entry point
 ```
 
-## Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run integration tests
-cargo test --test integration_test
-
-# Run benchmarks
-cargo bench
-```
-
 ## Documentation
 
-- [Quick Start Guide](documentation/QUICK_START.md) - Get started quickly with examples
-- [Architecture](documentation/ARCHITECTURE.md) - System design and components
-- [API Reference](documentation/API.md) - REST and gRPC API documentation
-- [Performance](documentation/PERFORMANCE.md) - Benchmarks and optimization details
+- [Quick Start Guide](documentation/QUICK_START.md) - Get started quickly
+- [Architecture](documentation/ARCHITECTURE.md) - System design
+- [API Reference](documentation/API.md) - REST and gRPC API docs
+- [Performance](documentation/PERFORMANCE.md) - Benchmarks and optimizations
+
+## Links
+
+- **Crates.io**: https://crates.io/crates/distx
+- **Documentation**: https://docs.rs/distx
+- **GitHub**: https://github.com/antonellof/DistX
 
 ## License
 
-DistX is licensed under the [GNU General Public License v3.0](https://github.com/antonellof/DistX/blob/main/LICENSE).
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
