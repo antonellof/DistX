@@ -41,7 +41,8 @@ pub struct PointSnapshot {
 
 /// Fork-based background save
 pub struct ForkBasedPersistence {
-    data_dir: PathBuf,
+    #[allow(dead_code)]
+    data_dir: PathBuf,  // Stored for potential future use
     rdb_filename: PathBuf,
 }
 

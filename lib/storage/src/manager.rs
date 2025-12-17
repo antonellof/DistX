@@ -146,6 +146,10 @@ impl StorageManager {
         self.collections.read().keys().cloned().collect()
     }
 
+    pub fn collection_exists(&self, name: &str) -> bool {
+        self.collections.read().contains_key(name)
+    }
+
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }

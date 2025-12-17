@@ -8,7 +8,8 @@ use parking_lot::Mutex;
 /// Write-Ahead Log for durability
 pub struct WriteAheadLog {
     file: Arc<Mutex<BufWriter<File>>>,
-    path: PathBuf,
+    #[allow(dead_code)]
+    path: PathBuf,  // Stored for potential future use (e.g., log rotation)
 }
 
 impl WriteAheadLog {
