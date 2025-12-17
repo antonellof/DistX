@@ -169,15 +169,83 @@ impl ForkBasedPersistence {
     }
 
     /// Load snapshot from disk (on startup)
+    /// Handles corruption gracefully following Redis/Qdrant patterns:
+    /// - Validates data integrity
+    /// - Backs up corrupt files
+    /// - Returns None instead of crashing
+    /// - Logs detailed warnings
     pub fn load_snapshot(&self) -> Result<Option<SnapshotData>> {
         if !self.rdb_filename.exists() {
+            eprintln!("[DistX] No snapshot file found, starting with empty database");
+            return Ok(None);
+        }
+        
+        // Check for version/marker file (Qdrant pattern)
+        let version_file = self.rdb_filename.with_extension("version");
+        if self.rdb_filename.exists() && !version_file.exists() {
+            // Snapshot exists but no version file - incomplete save (crash recovery)
+            eprintln!("[DistX] Warning: Snapshot file exists but version marker missing.");
+            eprintln!("[DistX] This indicates an incomplete save. Starting fresh.");
+            self.backup_and_remove_corrupt_file("incomplete");
             return Ok(None);
         }
 
-        let data = std::fs::read(&self.rdb_filename)?;
-        let snapshot: SnapshotData = bincode::deserialize(&data)
-            .map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
-        Ok(Some(snapshot))
+        // Read the file
+        let data = match std::fs::read(&self.rdb_filename) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[DistX] Warning: Could not read snapshot file: {}", e);
+                eprintln!("[DistX] Starting with empty database.");
+                return Ok(None);
+            }
+        };
+        
+        // Check minimum size (basic integrity check like Redis)
+        if data.len() < 16 {
+            eprintln!("[DistX] Warning: Snapshot file too small ({} bytes), likely corrupt", data.len());
+            self.backup_and_remove_corrupt_file("too_small");
+            return Ok(None);
+        }
+        
+        // Deserialize with error handling (Redis: skip corrupt entries where possible)
+        match bincode::deserialize(&data) {
+            Ok(snapshot) => {
+                eprintln!("[DistX] Successfully loaded snapshot ({} bytes)", data.len());
+                Ok(Some(snapshot))
+            }
+            Err(e) => {
+                // Data is corrupted - backup and start fresh (Redis/Qdrant pattern)
+                eprintln!("[DistX] Warning: Snapshot data is corrupted: {}", e);
+                eprintln!("[DistX] Starting with empty database.");
+                self.backup_and_remove_corrupt_file("corrupt");
+                Ok(None)
+            }
+        }
+    }
+    
+    /// Backup corrupt file and remove original (Redis pattern: preserve for debugging)
+    fn backup_and_remove_corrupt_file(&self, reason: &str) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
+        let backup_name = format!("dump.{}.{}.bak", reason, timestamp);
+        let backup_path = self.rdb_filename.with_file_name(backup_name);
+        
+        if let Err(e) = std::fs::rename(&self.rdb_filename, &backup_path) {
+            eprintln!("[DistX] Could not backup corrupt file: {}", e);
+            // Try to delete it instead
+            if let Err(del_err) = std::fs::remove_file(&self.rdb_filename) {
+                eprintln!("[DistX] Could not delete corrupt file: {}", del_err);
+            }
+        } else {
+            eprintln!("[DistX] Corrupt snapshot backed up to: {:?}", backup_path);
+        }
+        
+        // Also remove version file if it exists
+        let version_file = self.rdb_filename.with_extension("version");
+        let _ = std::fs::remove_file(&version_file);
     }
 
     /// Check if background save is in progress
@@ -191,13 +259,27 @@ impl ForkBasedPersistence {
     }
 
     /// Force save (synchronous, blocks until complete)
+    /// Uses atomic rename pattern (Redis) and version markers (Qdrant)
     pub fn save(&self, collections: &std::collections::HashMap<String, Arc<distx_core::Collection>>) -> Result<()> {
         let snapshot = self.create_snapshot(collections)?;
         let temp_file = self.rdb_filename.with_extension("tmp");
+        let version_file = self.rdb_filename.with_extension("version");
+        
+        // Serialize data
         let data = bincode::serialize(&snapshot)
             .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+        
+        // Write to temp file first (atomic write pattern from Redis)
         std::fs::write(&temp_file, &data)?;
+        
+        // Atomic rename (Redis pattern - prevents partial writes)
         std::fs::rename(&temp_file, &self.rdb_filename)?;
+        
+        // Write version marker (Qdrant pattern - indicates complete save)
+        let version_data = format!("distx:0.1.0:{}", data.len());
+        std::fs::write(&version_file, version_data)?;
+        
+        eprintln!("[DistX] Snapshot saved ({} bytes)", data.len());
         Ok(())
     }
 }
