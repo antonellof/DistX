@@ -5,8 +5,8 @@ use std::sync::Arc;
 use rand::prelude::*;
 
 fn generate_random_vector(dim: usize) -> Vector {
-    let mut rng = rand::thread_rng();
-    let data: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+    let mut rng = rand::rng();
+    let data: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
     Vector::new(data)
 }
 
