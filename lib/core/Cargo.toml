@@ -2,6 +2,15 @@
 name = "distx-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "Core library for DistX vector database - HNSW indexing, SIMD operations, BM25 search"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/distx"
+documentation = "https://docs.rs/distx-core"
+readme = "../../README.md"
+keywords = ["vector-database", "hnsw", "simd", "embeddings", "similarity-search"]
+categories = ["database", "data-structures", "algorithms"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

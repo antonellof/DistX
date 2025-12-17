@@ -2,6 +2,14 @@
 name = "distx-api"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "REST and gRPC API for DistX vector database - Qdrant-compatible endpoints"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/distx"
+documentation = "https://docs.rs/distx-api"
+keywords = ["vector-database", "rest-api", "grpc", "qdrant"]
+categories = ["database", "web-programming"]
 
 [dependencies]
 distx-core = { path = "../core" }

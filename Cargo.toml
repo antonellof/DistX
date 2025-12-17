@@ -2,9 +2,17 @@
 name = "distx"
 version = "0.1.0"
 edition = "2021"
-description = "A simple, fast, in-memory and persistent vector database - Redis-style simplicity with Qdrant compatibility"
-authors = ["Your Name <you@example.com>"]
-license = "GPL-3.0"
+rust-version = "1.75"
+description = "A fast in-memory vector database with Qdrant API compatibility - 6x faster search than Qdrant, 10x faster inserts than Redis"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/distx"
+homepage = "https://github.com/antonellof/distx"
+documentation = "https://docs.rs/distx"
+readme = "README.md"
+keywords = ["vector-database", "embeddings", "similarity-search", "hnsw", "qdrant"]
+categories = ["database", "data-structures", "algorithms"]
+exclude = ["data/", "scripts/", "benches/", "tests/"]
 
 [workspace]
 members = [

@@ -2,6 +2,14 @@
 name = "distx-storage"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "Storage layer for DistX vector database - WAL, snapshots, LMDB persistence"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/distx"
+documentation = "https://docs.rs/distx-storage"
+keywords = ["vector-database", "storage", "persistence", "wal", "lmdb"]
+categories = ["database"]
 
 [dependencies]
 distx-core = { path = "../core" }
