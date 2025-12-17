@@ -12,8 +12,8 @@ keywords = ["vector-database", "rest-api", "grpc", "qdrant"]
 categories = ["database", "web-programming"]
 
 [dependencies]
-distx-core = { path = "../core" }
-distx-storage = { path = "../storage" }
+distx-core = { version = "0.1.0", path = "../core" }
+distx-storage = { version = "0.1.0", path = "../storage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
