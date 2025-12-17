@@ -1,0 +1,71 @@
+[package]
+name = "distx"
+version = "0.1.0"
+edition = "2021"
+description = "A simple, fast, in-memory and persistent vector database - Redis-style simplicity with Qdrant compatibility"
+authors = ["Your Name <you@example.com>"]
+license = "GPL-3.0"
+
+[workspace]
+members = [
+    "lib/core",
+    "lib/storage",
+    "lib/api",
+]
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.48", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+parking_lot = "0.12"
+ahash = "0.8"
+bytes = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+
+# API dependencies
+actix-web = { version = "4.11", features = ["rustls-0_23"] }
+actix-cors = "0.7"
+tonic = { version = "0.11", features = ["gzip"] }
+prost = "0.12"
+prost-types = "0.12"
+
+# Storage
+bincode = "1.3"
+atomicwrites = "0.4"
+heed = "0.22"  # LMDB wrapper for fast persistence
+nix = { version = "0.29", features = ["process"] }
+
+# Utilities
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+log = "0.4"
+
+# Internal crates
+distx-core = { path = "lib/core" }
+distx-storage = { path = "lib/storage" }
+distx-api = { path = "lib/api" }
+
+[dev-dependencies]
+tempfile = "3.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.9"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[[bench]]
+name = "intensive_benchmark"
+harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+debug = "line-tables-only"

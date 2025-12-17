@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    
+    - name: Install LMDB
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblmdb-dev
+    
+    - name: Check code
+      run: cargo check --all-targets
+    
+    - name: Run clippy
+      run: cargo clippy --all-targets -- -D warnings
+    
+    - name: Run tests
+      run: cargo test --release
+    
+    - name: Build release
+      run: cargo build --release
+    
+    - name: Run benchmarks
+      run: cargo bench --bench benchmark -- --output-format html
+      continue-on-error: true
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: benchmark-results
+        path: target/criterion/
+
