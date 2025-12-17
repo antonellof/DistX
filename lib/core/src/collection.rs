@@ -87,6 +87,11 @@ impl Collection {
         self.points.read().len()
     }
 
+    /// Get all points in the collection
+    pub fn get_all_points(&self) -> Vec<Point> {
+        self.points.read().values().cloned().collect()
+    }
+
     /// Insert or update a point
     pub fn upsert(&self, point: Point) -> Result<()> {
         if point.vector.dim() != self.config.vector_dim {

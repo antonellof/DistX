@@ -89,6 +89,7 @@ impl RestApi {
                 .route("/collections/{name}", web::put().to(create_collection))
                 .route("/collections/{name}", web::delete().to(delete_collection))
                 .route("/collections/{name}/points", web::put().to(upsert_points))
+                .route("/collections/{name}/points/delete", web::post().to(delete_points_by_filter))
                 .route("/collections/{name}/points/search", web::post().to(search_points))
                 .route("/collections/{name}/points/{id}", web::get().to(get_point))
                 .route("/collections/{name}/points/{id}", web::delete().to(delete_point))
@@ -183,7 +184,10 @@ async fn get_collection(
                         "deleted_threshold": 0.2,
                         "vacuum_min_vector_number": 1000,
                         "default_segment_number": 0,
-                        "indexing_threshold": 20000
+                        "indexing_threshold": 20000,
+                        "flush_interval_sec": 5,
+                        "max_segment_size_mb": null,
+                        "memmap_threshold_mb": null
                     },
                     "wal_config": {
                         "wal_capacity_mb": 32,
@@ -522,6 +526,108 @@ async fn delete_point(
             }
         }))),
     }
+}
+
+#[derive(Deserialize)]
+struct DeletePointsRequest {
+    filter: Option<DeleteFilter>,
+    points: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct DeleteFilter {
+    must: Option<Vec<FilterMust>>,
+}
+
+#[derive(Deserialize)]
+struct FilterMust {
+    key: String,
+    #[serde(rename = "match")]
+    match_value: MatchValue,
+}
+
+#[derive(Deserialize)]
+struct MatchValue {
+    value: serde_json::Value,
+}
+
+async fn delete_points_by_filter(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<DeletePointsRequest>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    
+    let collection = match storage.get_collection(&collection_name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": {
+                    "error": "Collection not found"
+                }
+            })));
+        }
+    };
+    
+    let mut _deleted_count = 0;
+    
+    // Handle filter-based deletion
+    if let Some(filter) = &req.filter {
+        if let Some(must_conditions) = &filter.must {
+            // Get the field and value to match
+            if let Some(condition) = must_conditions.first() {
+                let field_key = &condition.key;
+                let match_value = &condition.match_value.value;
+                
+                // Get all points and filter by payload
+                let all_points = collection.get_all_points();
+                let mut points_to_delete = Vec::new();
+                
+                for point in all_points {
+                    if let Some(payload) = &point.payload {
+                        if let Some(field_value) = payload.get(field_key) {
+                            if field_value == match_value {
+                                points_to_delete.push(point.id.clone());
+                            }
+                        }
+                    }
+                }
+                
+                // Delete matching points
+                for point_id in points_to_delete {
+                    let id_str = match &point_id {
+                        distx_core::PointId::String(s) => s.clone(),
+                        distx_core::PointId::Integer(i) => i.to_string(),
+                        distx_core::PointId::Uuid(u) => u.to_string(),
+                    };
+                    if collection.delete(&id_str).is_ok() {
+                        _deleted_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Handle point ID-based deletion
+    if let Some(point_ids) = &req.points {
+        for point_id in point_ids {
+            let id_str = match point_id {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            if collection.delete(&id_str).is_ok() {
+                _deleted_count += 1;
+            }
+        }
+    }
+    
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
 }
 
 async fn collection_exists(
