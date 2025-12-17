@@ -1,6 +1,6 @@
 [package]
 name = "distx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "A fast in-memory vector database with Qdrant API compatibility - 6x faster search than Qdrant, 10x faster inserts than Redis"
@@ -53,9 +53,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 log = "0.4"
 
 # Internal crates
-distx-core = { version = "0.1.0", path = "lib/core" }
-distx-storage = { version = "0.1.0", path = "lib/storage" }
-distx-api = { version = "0.1.0", path = "lib/api" }
+distx-core = { version = "0.1.1", path = "lib/core" }
+distx-storage = { version = "0.1.1", path = "lib/storage" }
+distx-api = { version = "0.1.1", path = "lib/api" }
 
 [dev-dependencies]
 tempfile = "3.0"

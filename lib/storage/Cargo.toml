@@ -1,6 +1,6 @@
 [package]
 name = "distx-storage"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Storage layer for DistX vector database - WAL, snapshots, LMDB persistence"
@@ -12,7 +12,7 @@ keywords = ["vector-database", "storage", "persistence", "wal", "lmdb"]
 categories = ["database"]
 
 [dependencies]
-distx-core = { version = "0.1.0", path = "../core" }
+distx-core = { version = "0.1.1", path = "../core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"
