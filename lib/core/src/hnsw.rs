@@ -31,6 +31,7 @@ impl HnswIndex {
     }
 
     /// Select layer using exponential decay
+    #[inline]
     fn select_layer(&self) -> usize {
         let mut layer = 0;
         while layer < self.max_layers - 1 && rand::random::<f32>() < 0.5 {
@@ -108,6 +109,7 @@ impl HnswIndex {
     }
 
     /// Distance between query vector and node
+    #[inline]
     fn distance(&self, query: &Vector, node_idx: usize) -> f32 {
         let node = &self.nodes[node_idx];
         let dot = crate::simd::dot_product_simd(query.as_slice(), node.point.vector.as_slice());
@@ -136,7 +138,7 @@ impl HnswIndex {
 
         while current_layer > layer {
             let neighbors = self.search_layer(&point.vector, entry_point, 1, current_layer);
-            if neighbors.first().is_some() {
+            if !neighbors.is_empty() {
                 current_layer -= 1;
             } else {
                 break;
@@ -197,7 +199,7 @@ impl HnswIndex {
 
         while current_layer > 0 {
             let neighbors = self.search_layer(query, entry_point, 1, current_layer);
-            if neighbors.first().is_some() {
+            if !neighbors.is_empty() {
                 current_layer -= 1;
             } else {
                 break;
@@ -234,8 +236,16 @@ impl HnswIndex {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
     }
 }
 

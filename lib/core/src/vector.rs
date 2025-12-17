@@ -8,29 +8,46 @@ pub struct Vector {
 }
 
 impl Vector {
+    #[inline]
+    #[must_use]
     pub fn new(data: Vec<f32>) -> Self {
         Self { data }
     }
 
+    #[inline]
+    #[must_use]
     pub fn from_slice(data: &[f32]) -> Self {
         Self {
             data: data.to_vec(),
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn dim(&self) -> usize {
         self.data.len()
     }
 
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
     pub fn as_slice(&self) -> &[f32] {
         &self.data
     }
 
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
         &mut self.data
     }
 
     /// Compute cosine similarity with another vector
+    /// Uses SIMD-optimized operations for both dot product and norms
+    #[inline]
     pub fn cosine_similarity(&self, other: &Vector) -> f32 {
         if self.dim() != other.dim() {
             return 0.0;
@@ -38,8 +55,9 @@ impl Vector {
 
         let dot_product = crate::simd::dot_product_simd(&self.data, &other.data);
 
-        let norm_a: f32 = self.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = other.data.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // Use SIMD-optimized norm calculation
+        let norm_a = crate::simd::norm_simd(&self.data);
+        let norm_b = crate::simd::norm_simd(&other.data);
 
         if norm_a == 0.0 || norm_b == 0.0 {
             return 0.0;
@@ -49,6 +67,7 @@ impl Vector {
     }
 
     /// Compute L2 (Euclidean) distance
+    #[inline]
     pub fn l2_distance(&self, other: &Vector) -> f32 {
         if self.dim() != other.dim() {
             return f32::INFINITY;
@@ -58,16 +77,21 @@ impl Vector {
     }
 
     /// Normalize the vector to unit length
+    /// Uses SIMD-optimized norm calculation
+    #[inline]
     pub fn normalize(&mut self) {
-        let norm: f32 = self.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 {
+        let norm = crate::simd::norm_simd(&self.data);
+        if norm > f32::EPSILON {
+            let inv_norm = 1.0 / norm;
             for x in &mut self.data {
-                *x /= norm;
+                *x *= inv_norm;
             }
         }
     }
 
     /// Get normalized copy
+    #[inline]
+    #[must_use]
     pub fn normalized(&self) -> Self {
         let mut v = self.clone();
         v.normalize();

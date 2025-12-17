@@ -71,20 +71,34 @@ impl Collection {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.config.name
     }
 
+    #[inline]
+    #[must_use]
     pub fn vector_dim(&self) -> usize {
         self.config.vector_dim
     }
 
+    #[inline]
+    #[must_use]
     pub fn distance(&self) -> Distance {
         self.config.distance
     }
 
+    #[inline]
+    #[must_use]
     pub fn count(&self) -> usize {
         self.points.read().len()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.points.read().is_empty()
     }
 
     /// Get all points in the collection
@@ -114,7 +128,6 @@ impl Collection {
             let built = *self.hnsw_built.read();
             if built {
                 let mut normalized_point = point.clone();
-                normalized_point.vector.normalize();
                 normalized_point.vector.normalize();
                 
                 let mut index = hnsw.write();
@@ -192,6 +205,7 @@ impl Collection {
     }
 
     /// Get a point by ID
+    #[inline]
     pub fn get(&self, id: &str) -> Option<Point> {
         self.points.read().get(id).cloned()
     }

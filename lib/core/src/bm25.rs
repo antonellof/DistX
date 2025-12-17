@@ -16,6 +16,8 @@ pub struct BM25Index {
 }
 
 impl BM25Index {
+    #[inline]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inverted_index: HashMap::new(),
@@ -27,11 +29,14 @@ impl BM25Index {
         }
     }
 
+    /// Tokenize text for BM25 indexing
+    /// Uses lowercase normalization and removes punctuation
+    #[inline]
     pub fn tokenize(text: &str) -> Vec<String> {
         text.to_lowercase()
-            .split_whitespace()
+            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
             .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && s.len() > 1)  // Filter single chars
             .collect()
     }
 
@@ -52,7 +57,7 @@ impl BM25Index {
         for (term, tf) in &term_freqs {
             self.inverted_index
                 .entry(term.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(doc_id.to_string(), *tf);
         }
 
@@ -152,8 +157,16 @@ impl BM25Index {
         idf * (numerator / denominator)
     }
 
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.doc_lengths.len()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.doc_lengths.is_empty()
     }
 }
 

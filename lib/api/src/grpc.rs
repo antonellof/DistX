@@ -88,7 +88,7 @@ impl DistX for GrpcApi {
         let proto_results: Vec<ProtoSearchResult> = results.into_iter().map(|(point, score)| {
             let id = match point.id {
                 PointId::String(s) => distx::PointId { id: Some(distx::point_id::Id::IdString(s)) },
-                PointId::Integer(i) => distx::PointId { id: Some(distx::point_id::Id::IdInteger(i as u64)) },
+                PointId::Integer(i) => distx::PointId { id: Some(distx::point_id::Id::IdInteger(i)) },
                 PointId::Uuid(u) => distx::PointId { id: Some(distx::point_id::Id::IdString(u.to_string())) },
             };
             
@@ -96,13 +96,7 @@ impl DistX for GrpcApi {
                 .and_then(|p| p.as_object())
                 .map(|obj| {
                     obj.iter()
-                        .filter_map(|(k, v)| {
-                            if let Some(s) = v.as_str() {
-                                Some((k.clone(), s.to_string()))
-                            } else {
-                                None
-                            }
-                        })
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -149,13 +143,7 @@ impl DistX for GrpcApi {
                     .and_then(|p| p.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .filter_map(|(k, v)| {
-                                if let Some(s) = v.as_str() {
-                                    Some((k.clone(), s.to_string()))
-                                } else {
-                                    None
-                                }
-                            })
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                             .collect()
                     })
                     .unwrap_or_default(),

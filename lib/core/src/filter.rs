@@ -25,15 +25,17 @@ pub enum FilterCondition {
 }
 
 impl PayloadFilter {
+    #[inline]
+    #[must_use]
     pub fn new(condition: FilterCondition) -> Self {
         Self { condition }
     }
 
+    #[inline]
     fn get_field_value<'a>(point: &'a Point, field: &str) -> Option<&'a Value> {
         point.payload.as_ref().and_then(|p| {
-            if field.starts_with('.') {
-                let field = &field[1..];
-                p.get(field)
+            if let Some(stripped) = field.strip_prefix('.') {
+                p.get(stripped)
             } else {
                 p.get(field)
             }
@@ -96,6 +98,7 @@ impl PayloadFilter {
 }
 
 impl Filter for PayloadFilter {
+    #[inline]
     fn matches(&self, point: &Point) -> bool {
         Self::matches_condition(&self.condition, point)
     }

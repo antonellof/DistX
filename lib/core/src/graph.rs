@@ -22,6 +22,8 @@ pub struct Edge {
 }
 
 impl Node {
+    #[inline]
+    #[must_use]
     pub fn new(id: NodeId, label: String) -> Self {
         Self {
             id,
@@ -30,6 +32,8 @@ impl Node {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn with_property(mut self, key: String, value: serde_json::Value) -> Self {
         self.properties.insert(key, value);
         self
@@ -37,6 +41,8 @@ impl Node {
 }
 
 impl Edge {
+    #[inline]
+    #[must_use]
     pub fn new(id: EdgeId, from: NodeId, to: NodeId, label: String) -> Self {
         Self {
             id,
@@ -47,6 +53,8 @@ impl Edge {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn with_property(mut self, key: String, value: serde_json::Value) -> Self {
         self.properties.insert(key, value);
         self

@@ -18,12 +18,12 @@ pub enum PointId {
     Integer(u64),
 }
 
-impl PointId {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for PointId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PointId::String(s) => s.clone(),
-            PointId::Uuid(u) => u.to_string(),
-            PointId::Integer(i) => i.to_string(),
+            PointId::String(s) => write!(f, "{}", s),
+            PointId::Uuid(u) => write!(f, "{}", u),
+            PointId::Integer(i) => write!(f, "{}", i),
         }
     }
 }
@@ -47,6 +47,8 @@ impl From<Uuid> for PointId {
 }
 
 impl Point {
+    #[inline]
+    #[must_use]
     pub fn new(id: PointId, vector: Vector, payload: Option<serde_json::Value>) -> Self {
         Self {
             id,
@@ -55,6 +57,8 @@ impl Point {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn with_payload(mut self, payload: serde_json::Value) -> Self {
         self.payload = Some(payload);
         self

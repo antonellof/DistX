@@ -1,7 +1,6 @@
 // Integration tests for DistX
 use distx_core::{Collection, CollectionConfig, Distance, Point, PointId, Vector};
 use distx_storage::StorageManager;
-use std::sync::Arc;
 
 #[test]
 fn test_collection_creation() {

@@ -133,6 +133,7 @@ impl StorageManager {
         Ok(collection)
     }
 
+    #[inline]
     pub fn get_collection(&self, name: &str) -> Option<Arc<Collection>> {
         self.collections.read().get(name).cloned()
     }
@@ -142,14 +143,20 @@ impl StorageManager {
         Ok(collections.remove(name).is_some())
     }
 
+    #[inline]
+    #[must_use]
     pub fn list_collections(&self) -> Vec<String> {
         self.collections.read().keys().cloned().collect()
     }
 
+    #[inline]
+    #[must_use]
     pub fn collection_exists(&self, name: &str) -> bool {
         self.collections.read().contains_key(name)
     }
 
+    #[inline]
+    #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }

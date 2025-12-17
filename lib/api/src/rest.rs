@@ -89,6 +89,7 @@ impl RestApi {
                 .route("/collections/{name}", web::put().to(create_collection))
                 .route("/collections/{name}", web::delete().to(delete_collection))
                 .route("/collections/{name}/points", web::put().to(upsert_points))
+                .route("/collections/{name}/points/scroll", web::post().to(scroll_points))
                 .route("/collections/{name}/points/delete", web::post().to(delete_points_by_filter))
                 .route("/collections/{name}/points/search", web::post().to(search_points))
                 .route("/collections/{name}/points/{id}", web::get().to(get_point))
@@ -303,22 +304,18 @@ async fn upsert_points(
                 const PREWARM_THRESHOLD: usize = 1000;
                 let should_prewarm = points_vec.len() >= PREWARM_THRESHOLD;
                 
-                if should_prewarm {
-                    if let Err(e) = collection.batch_upsert_with_prewarm(points_vec, true) {
-                        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                            "status": {
-                                "error": e.to_string()
-                            }
-                        })));
-                    }
+                let result = if should_prewarm {
+                    collection.batch_upsert_with_prewarm(points_vec, true)
                 } else {
-                    if let Err(e) = collection.batch_upsert(points_vec) {
-                        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                            "status": {
-                                "error": e.to_string()
-                            }
-                        })));
-                    }
+                    collection.batch_upsert(points_vec)
+                };
+                
+                if let Err(e) = result {
+                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                        "status": {
+                            "error": e.to_string()
+                        }
+                    })));
                 }
             } else if let Some(point) = points_vec.first() {
                 if let Err(e) = collection.upsert(point.clone()) {
@@ -452,6 +449,108 @@ fn parse_filter(filter_json: &serde_json::Value) -> Option<FilterCondition> {
         }
     }
     None
+}
+
+#[derive(Deserialize)]
+struct ScrollRequest {
+    limit: Option<usize>,
+    offset: Option<serde_json::Value>,
+    with_payload: Option<bool>,
+    with_vector: Option<bool>,
+}
+
+async fn scroll_points(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<ScrollRequest>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    
+    let collection = match storage.get_collection(&collection_name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": {
+                    "error": "Collection not found"
+                }
+            })));
+        }
+    };
+    
+    let limit = req.limit.unwrap_or(10);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    
+    // Get offset as integer if provided
+    let offset_id: Option<i64> = req.offset.as_ref().and_then(|v| {
+        match v {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    });
+    
+    // Get all points and sort by ID for consistent pagination
+    let all_points = collection.get_all_points();
+    let mut points_with_ids: Vec<_> = all_points.iter()
+        .map(|p| {
+            let id_num: i64 = match &p.id {
+                distx_core::PointId::Integer(i) => *i as i64,
+                distx_core::PointId::String(s) => s.parse::<i64>().unwrap_or(0),
+                distx_core::PointId::Uuid(_) => 0,
+            };
+            (id_num, p)
+        })
+        .collect();
+    
+    points_with_ids.sort_by_key(|(id, _)| *id);
+    
+    // Apply offset
+    let start_idx = if let Some(offset) = offset_id {
+        points_with_ids.iter().position(|(id, _)| *id > offset).unwrap_or(points_with_ids.len())
+    } else {
+        0
+    };
+    
+    // Get page of results
+    let page: Vec<_> = points_with_ids.iter()
+        .skip(start_idx)
+        .take(limit)
+        .collect();
+    
+    // Determine next offset
+    let next_offset = if page.len() == limit && start_idx + limit < points_with_ids.len() {
+        page.last().map(|(id, _)| serde_json::json!(*id))
+    } else {
+        None
+    };
+    
+    // Format results
+    let results: Vec<serde_json::Value> = page.iter().map(|(_, point)| {
+        let mut obj = serde_json::json!({
+            "id": match &point.id {
+                distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+                distx_core::PointId::Integer(i) => serde_json::json!(*i),
+                distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+            },
+        });
+        
+        if with_payload {
+            obj["payload"] = point.payload.clone().unwrap_or(serde_json::json!({}));
+        }
+        if with_vector {
+            obj["vector"] = serde_json::json!(point.vector.as_slice());
+        }
+        
+        obj
+    }).collect();
+    
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "points": results,
+            "next_page_offset": next_offset
+        }
+    })))
 }
 
 async fn get_point(
