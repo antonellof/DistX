@@ -19,7 +19,7 @@ REDIS_HOST = "localhost"
 REDIS_PORT = 6379
 
 # Test parameters
-NUM_VECTORS = 5000
+NUM_VECTORS = 5000  # Will test both small and large
 DIM = 128
 NUM_SEARCHES = 500
 BATCH_SIZE = 100

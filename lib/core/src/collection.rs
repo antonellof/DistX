@@ -245,7 +245,51 @@ impl Collection {
         Ok(())
     }
 
+    /// Fast brute-force search using SIMD - optimal for small datasets
+    fn brute_force_search(&self, query: &Vector, limit: usize, filter: Option<&dyn Filter>) -> Vec<(Point, f32)> {
+        let points = self.points.read();
+        let query_slice = query.as_slice();
+        
+        // Pre-allocate results with capacity
+        let mut results: Vec<(Point, f32)> = Vec::with_capacity(points.len().min(limit * 2));
+        
+        for point in points.values() {
+            if let Some(f) = filter {
+                if !f.matches(point) {
+                    continue;
+                }
+            }
+            
+            // Use SIMD-optimized dot product for cosine similarity (vectors are normalized)
+            let score = match self.config.distance {
+                Distance::Cosine => {
+                    crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                }
+                Distance::Euclidean => {
+                    -crate::simd::l2_distance_simd(query_slice, point.vector.as_slice())
+                }
+                Distance::Dot => {
+                    crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                }
+            };
+            
+            results.push((point.clone(), score));
+        }
+        
+        // Use partial sort for efficiency when limit << len
+        if results.len() > limit {
+            results.select_nth_unstable_by(limit, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(limit);
+        }
+        
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
     /// Search for similar vectors
+    /// Uses brute-force for small datasets (<1000), HNSW for larger ones
     pub fn search(
         &self,
         query: &Vector,
@@ -253,22 +297,33 @@ impl Collection {
         filter: Option<&dyn Filter>,
     ) -> Vec<(Point, f32)> {
         let normalized_query = query.normalized();
+        let point_count = self.points.read().len();
+        
+        // Use brute-force for small datasets - faster than HNSW overhead
+        const BRUTE_FORCE_THRESHOLD: usize = 1000;
+        if point_count < BRUTE_FORCE_THRESHOLD {
+            return self.brute_force_search(&normalized_query, limit, filter);
+        }
         
         if let Some(hnsw) = &self.hnsw {
-            let mut built = self.hnsw_built.write();
-            if !*built {
-                let points = self.points.read();
-                if !points.is_empty() {
-                    let mut index = hnsw.write();
-                    *index = HnswIndex::new(16, 3);
-                    for point in points.values() {
-                        index.insert(point.clone());
+            // Check if we need to build the index first
+            {
+                let mut built = self.hnsw_built.write();
+                if !*built {
+                    let points = self.points.read();
+                    if !points.is_empty() {
+                        let mut index = hnsw.write();
+                        *index = HnswIndex::new(16, 3);
+                        for point in points.values() {
+                            index.insert(point.clone());
+                        }
+                        *built = true;
                     }
-                    *built = true;
                 }
             }
             
-            let index = hnsw.read();
+            // Use write lock for search (HNSW search is now mutable for performance)
+            let mut index = hnsw.write();
             let mut results = index.search(&normalized_query, limit, None);
             
             if let Some(f) = filter {

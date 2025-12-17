@@ -140,25 +140,43 @@ unsafe fn dot_product_sse(a: &[f32], b: &[f32]) -> f32 {
     dot
 }
 
-/// NEON-optimized dot product for ARM/Apple Silicon (qdrant compatibility)
+/// NEON-optimized dot product for ARM/Apple Silicon
+/// Uses 8-wide processing with two NEON registers for better throughput
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[inline]
 unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
     let dim = a.len();
     let mut i = 0;
-    let mut sum = vdupq_n_f32(0.0);
     
-    // Process 4 floats at a time
+    // Use two accumulators for better instruction pipelining
+    let mut sum1 = vdupq_n_f32(0.0);
+    let mut sum2 = vdupq_n_f32(0.0);
+    
+    // Process 8 floats at a time with two NEON registers
+    while i + 7 < dim {
+        let va1 = vld1q_f32(a.as_ptr().add(i));
+        let vb1 = vld1q_f32(b.as_ptr().add(i));
+        let va2 = vld1q_f32(a.as_ptr().add(i + 4));
+        let vb2 = vld1q_f32(b.as_ptr().add(i + 4));
+        
+        sum1 = vfmaq_f32(sum1, va1, vb1);
+        sum2 = vfmaq_f32(sum2, va2, vb2);
+        
+        i += 8;
+    }
+    
+    // Process remaining 4 floats
     while i + 3 < dim {
         let va = vld1q_f32(a.as_ptr().add(i));
         let vb = vld1q_f32(b.as_ptr().add(i));
-        sum = vfmaq_f32(sum, va, vb);
+        sum1 = vfmaq_f32(sum1, va, vb);
         i += 4;
     }
     
-    // Horizontal sum
-    let mut dot = vaddvq_f32(sum);
+    // Combine accumulators and horizontal sum
+    let combined = vaddq_f32(sum1, sum2);
+    let mut dot = vaddvq_f32(combined);
     
     // Handle remaining elements
     while i < dim {
@@ -328,25 +346,46 @@ unsafe fn l2_distance_sse(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// NEON-optimized L2 distance for ARM/Apple Silicon
+/// Uses 8-wide processing with two NEON registers for better throughput
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[inline]
 unsafe fn l2_distance_neon(a: &[f32], b: &[f32]) -> f32 {
     let dim = a.len();
     let mut i = 0;
-    let mut sum = vdupq_n_f32(0.0);
     
-    // Process 4 floats at a time
+    // Use two accumulators for better instruction pipelining
+    let mut sum1 = vdupq_n_f32(0.0);
+    let mut sum2 = vdupq_n_f32(0.0);
+    
+    // Process 8 floats at a time with two NEON registers
+    while i + 7 < dim {
+        let va1 = vld1q_f32(a.as_ptr().add(i));
+        let vb1 = vld1q_f32(b.as_ptr().add(i));
+        let va2 = vld1q_f32(a.as_ptr().add(i + 4));
+        let vb2 = vld1q_f32(b.as_ptr().add(i + 4));
+        
+        let diff1 = vsubq_f32(va1, vb1);
+        let diff2 = vsubq_f32(va2, vb2);
+        
+        sum1 = vfmaq_f32(sum1, diff1, diff1);
+        sum2 = vfmaq_f32(sum2, diff2, diff2);
+        
+        i += 8;
+    }
+    
+    // Process remaining 4 floats
     while i + 3 < dim {
         let va = vld1q_f32(a.as_ptr().add(i));
         let vb = vld1q_f32(b.as_ptr().add(i));
         let diff = vsubq_f32(va, vb);
-        sum = vfmaq_f32(sum, diff, diff);
+        sum1 = vfmaq_f32(sum1, diff, diff);
         i += 4;
     }
     
-    // Horizontal sum
-    let mut sum_sq = vaddvq_f32(sum);
+    // Combine accumulators and horizontal sum
+    let combined = vaddq_f32(sum1, sum2);
+    let mut sum_sq = vaddvq_f32(combined);
     
     // Handle remaining elements
     while i < dim {
