@@ -28,22 +28,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
-          
-          # Windows
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -53,36 +40,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Protobuf (Ubuntu)
+      - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Install Protobuf (macOS)
+      - name: Install dependencies (Ubuntu musl)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: brew install protobuf
 
-      - name: Install Protobuf (Windows)
-        if: matrix.os == 'windows-latest'
-        run: choco install protoc -y
-
-      - name: Install musl-tools (Linux musl)
-        if: contains(matrix.target, 'musl') && matrix.os == 'ubuntu-latest'
-        run: sudo apt-get install -y musl-tools
-
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build (native)
-        if: "!matrix.cross"
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Create archive (Unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Create archive
         run: |
           mkdir -p dist/distx
           cp target/${{ matrix.target }}/release/distx dist/distx/
@@ -90,16 +63,6 @@ jobs:
           cd dist
           tar -czvf distx-${{ matrix.target }}.tar.gz distx
           shasum -a 256 distx-${{ matrix.target }}.tar.gz > distx-${{ matrix.target }}.tar.gz.sha256
-
-      - name: Create archive (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/distx
-          Copy-Item target/${{ matrix.target }}/release/distx.exe dist/distx/
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE dist/distx/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist/distx -DestinationPath dist/distx-${{ matrix.target }}.zip
-          (Get-FileHash dist/distx-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  distx-${{ matrix.target }}.zip" | Out-File dist/distx-${{ matrix.target }}.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -130,7 +93,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: artifacts/*
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
         env:
