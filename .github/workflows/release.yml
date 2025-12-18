@@ -10,7 +10,7 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,18 +19,18 @@ jobs:
           # macOS
           - target: aarch64-apple-darwin
             os: macos-latest
-            archive: tar.gz
+            name: macos-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            archive: tar.gz
+            name: macos-x86_64
           
           # Linux
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
+            name: linux-x86_64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            archive: tar.gz
+            name: linux-x86_64-musl
 
     steps:
       - uses: actions/checkout@v4
@@ -61,14 +61,14 @@ jobs:
           cp target/${{ matrix.target }}/release/distx dist/distx/
           cp README.md LICENSE-MIT LICENSE-APACHE dist/distx/ || true
           cd dist
-          tar -czvf distx-${{ matrix.target }}.tar.gz distx
-          shasum -a 256 distx-${{ matrix.target }}.tar.gz > distx-${{ matrix.target }}.tar.gz.sha256
+          tar -czvf distx-${{ matrix.name }}.tar.gz distx
+          shasum -a 256 distx-${{ matrix.name }}.tar.gz > distx-${{ matrix.name }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: distx-${{ matrix.target }}
-          path: dist/distx-${{ matrix.target }}.*
+          name: distx-${{ matrix.name }}
+          path: dist/distx-${{ matrix.name }}.*
 
   release:
     name: Create Release
