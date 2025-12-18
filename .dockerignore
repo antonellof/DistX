@@ -1,0 +1,45 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# Data files
+data/
+*.db
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation build
+docs/_build/
+
+# Test and benchmark data (keep benches/ for cargo manifest)
+benches/results/
+tests/fixtures/
+
+# Scripts (keep tools/ for web UI sync)
+scripts/
+
+# CI/CD
+.github/
+
+# Misc
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Cargo lock is needed for reproducible builds
+# !Cargo.lock

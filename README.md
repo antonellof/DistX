@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/distx.svg)](https://crates.io/crates/distx)
 [![Documentation](https://docs.rs/distx/badge.svg)](https://docs.rs/distx)
+[![Docker](https://img.shields.io/docker/v/distx/distx?label=docker)](https://hub.docker.com/r/distx/distx)
 [![License](https://img.shields.io/crates/l/distx.svg)](https://github.com/antonellof/DistX#license)
 
 A fast, in-memory vector database written in Rust. Designed with Redis-style simplicity and Qdrant API compatibility.
@@ -17,6 +18,31 @@ A fast, in-memory vector database written in Rust. Designed with Redis-style sim
 | **Search Latency** | 6.6x lower | 5x lower |
 
 See [Performance Benchmarks](documentation/PERFORMANCE.md) for detailed results.
+
+## Quick Start with Docker
+
+The fastest way to get started - no compilation required:
+
+```bash
+# Pull and run
+docker pull distx/distx:latest
+docker run -p 6333:6333 -p 6334:6334 \
+    -v "$(pwd)/distx_storage:/qdrant/storage" \
+    distx/distx:latest
+```
+
+Or with Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+DistX is now accessible at:
+- **REST API**: http://localhost:6333 (Qdrant-compatible)
+- **Web UI**: http://localhost:6333/dashboard
+- **gRPC API**: localhost:6334
+
+See [Docker Guide](documentation/DOCKER.md) for more options.
 
 ## Installation
 
@@ -72,6 +98,7 @@ distx --data-dir ./data --http-port 6333 --grpc-port 6334
 
 The server will start and listen on:
 - **REST API**: `http://localhost:6333` (Qdrant-compatible)
+- **Web UI**: `http://localhost:6333/dashboard`
 - **gRPC API**: `localhost:6334`
 
 ### Create a Collection
@@ -120,6 +147,8 @@ curl -X POST http://localhost:6333/collections/my_collection/points/search \
 - **Text Search**: BM25 full-text search with ranking
 - **Payload Filtering**: Filter results by JSON metadata
 - **Dual API**: REST (Qdrant-compatible) and gRPC
+- **Web Dashboard**: Built-in UI for visual management
+- **Docker Ready**: Single command deployment
 - **Persistence**: Redis-style snapshots, WAL, and LMDB storage
 - **Lightweight**: Single ~6MB binary
 
@@ -147,9 +176,24 @@ distx/
     └── main.rs        # Main entry point
 ```
 
+## Web Dashboard
+
+DistX includes a built-in web dashboard for visual management:
+
+![Dashboard](documentation/dashboard-preview.png)
+
+Access it at http://localhost:6333/dashboard
+
+**Features:**
+- View all collections and their statistics
+- Create and delete collections
+- Browse points with pagination
+- Interactive API console for testing
+
 ## Documentation
 
 - [Quick Start Guide](documentation/QUICK_START.md) - Get started quickly
+- [Docker Deployment](documentation/DOCKER.md) - Docker and docker-compose guide
 - [Architecture](documentation/ARCHITECTURE.md) - System design
 - [API Reference](documentation/API.md) - REST and gRPC API docs
 - [Performance](documentation/PERFORMANCE.md) - Benchmarks and optimizations

@@ -1,0 +1,46 @@
+# Docker Compose for DistX Vector Database
+# Usage: docker-compose up -d
+#
+# Services:
+#   - distx: The main vector database service
+#
+# Ports:
+#   - 6333: REST API (Qdrant-compatible)
+#   - 6334: gRPC API
+#
+# Volumes:
+#   - distx_storage: Persistent data storage
+
+version: '3.8'
+
+services:
+  distx:
+    image: distx/distx:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: distx
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - distx_storage:/qdrant/storage
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 512M
+
+volumes:
+  distx_storage:
+    driver: local

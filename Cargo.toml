@@ -1,6 +1,6 @@
 [package]
 name = "distx"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A fast in-memory vector database with Qdrant API compatibility - 6x faster search than Qdrant, 10x faster inserts than Redis"
@@ -12,7 +12,7 @@ documentation = "https://docs.rs/distx"
 readme = "README.md"
 keywords = ["vector-database", "embeddings", "similarity-search", "hnsw", "qdrant"]
 categories = ["database", "data-structures", "algorithms"]
-exclude = ["data/", "scripts/", "benches/", "tests/"]
+exclude = ["data/", "scripts/", "tests/"]
 
 [workspace]
 members = [
@@ -53,22 +53,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 log = "0.4"
 
 # Internal crates
-distx-core = { version = "0.1.1", path = "lib/core" }
-distx-storage = { version = "0.1.1", path = "lib/storage" }
-distx-api = { version = "0.1.1", path = "lib/api" }
+distx-core = { version = "0.2.0", path = "lib/core" }
+distx-storage = { version = "0.2.0", path = "lib/storage" }
+distx-api = { version = "0.2.0", path = "lib/api" }
 
 [dev-dependencies]
 tempfile = "3.0"
-criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.9"
-
-[[bench]]
-name = "benchmark"
-harness = false
-
-[[bench]]
-name = "intensive_benchmark"
-harness = false
 
 [profile.release]
 lto = "fat"

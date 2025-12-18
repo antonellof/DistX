@@ -1,23 +1,68 @@
 use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
 use actix_cors::Cors;
+use actix_files::Files;
 use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter};
 use distx_storage::StorageManager;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
+use std::path::Path;
+use std::collections::HashMap;
+
+// Dashboard configuration
+const STATIC_DIR: &str = "./static";
+const DASHBOARD_PATH: &str = "/dashboard";
 
 #[derive(Deserialize)]
 struct CreateCollectionRequest {
+    #[serde(deserialize_with = "deserialize_vectors")]
     vectors: VectorConfig,
     #[serde(default)]
     use_hnsw: bool,
     #[serde(default)]
     enable_bm25: bool,
+    // Qdrant compatibility - ignored fields
+    #[serde(default)]
+    sparse_vectors: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct VectorConfig {
     size: usize,
     distance: Option<String>,
+    // Qdrant compatibility - ignored fields
+    #[serde(default)]
+    on_disk: Option<bool>,
+    #[serde(default)]
+    hnsw_config: Option<serde_json::Value>,
+    #[serde(default)]
+    quantization_config: Option<serde_json::Value>,
+    #[serde(default)]
+    multivector_config: Option<serde_json::Value>,
+    #[serde(default)]
+    datatype: Option<String>,
+}
+
+// Custom deserializer to handle both simple and named vector formats
+fn deserialize_vectors<'de, D>(deserializer: D) -> Result<VectorConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    
+    // Try simple format first: {"size": 1536, "distance": "Cosine"}
+    if let Ok(config) = serde_json::from_value::<VectorConfig>(value.clone()) {
+        return Ok(config);
+    }
+    
+    // Try named vectors format: {"": {"size": 1536, ...}} or {"vector_name": {"size": 1536, ...}}
+    if let Ok(named) = serde_json::from_value::<HashMap<String, VectorConfig>>(value.clone()) {
+        // Use the first vector config (default or named)
+        if let Some(config) = named.into_values().next() {
+            return Ok(config);
+        }
+    }
+    
+    Err(serde::de::Error::custom("Invalid vectors configuration: expected either {\"size\": N, \"distance\": \"...\"} or {\"name\": {\"size\": N, ...}}"))
 }
 
 // Note: Using serde_json::json! for flexible responses instead of these structs
@@ -71,6 +116,16 @@ impl RestApi {
         storage: Arc<StorageManager>,
         port: u16,
     ) -> std::io::Result<()> {
+        Self::start_with_static_dir(storage, port, STATIC_DIR).await
+    }
+    
+    pub async fn start_with_static_dir(
+        storage: Arc<StorageManager>,
+        port: u16,
+        static_dir: &str,
+    ) -> std::io::Result<()> {
+        let static_folder = static_dir.to_string();
+        
         HttpServer::new(move || {
             let cors = Cors::default()
                 .allow_any_origin()
@@ -78,7 +133,7 @@ impl RestApi {
                 .allow_any_header()
                 .max_age(3600);
 
-            App::new()
+            let mut app = App::new()
                 .wrap(cors)
                 .app_data(web::Data::new(storage.clone()))
                 // Qdrant-compatible endpoints
@@ -95,6 +150,29 @@ impl RestApi {
                 .route("/collections/{name}/points/{id}", web::get().to(get_point))
                 .route("/collections/{name}/points/{id}", web::delete().to(delete_point))
                 .route("/collections/{name}/exists", web::get().to(collection_exists))
+                // Qdrant compatibility - additional endpoints
+                .route("/aliases", web::get().to(list_aliases))
+                .route("/cluster", web::get().to(cluster_info))
+                .route("/telemetry", web::get().to(telemetry_info))
+                // Snapshot endpoints (stubs for UI compatibility)
+                .route("/collections/{name}/snapshots", web::get().to(list_snapshots))
+                .route("/collections/{name}/snapshots", web::post().to(create_snapshot))
+                .route("/collections/{name}/snapshots/recover", web::put().to(recover_snapshot))
+                .route("/collections/{name}/snapshots/{snapshot_name}", web::get().to(get_snapshot))
+                .route("/collections/{name}/snapshots/{snapshot_name}", web::delete().to(delete_snapshot))
+                .route("/snapshots", web::get().to(list_all_snapshots));
+            
+            // Serve web UI dashboard if static folder exists
+            let static_path = Path::new(&static_folder);
+            if static_path.exists() && static_path.is_dir() {
+                app = app.service(
+                    Files::new(DASHBOARD_PATH, static_folder.clone())
+                        .index_file("index.html")
+                        .use_last_modified(true)
+                );
+            }
+            
+            app
         })
         .bind(("0.0.0.0", port))?
         .run()
@@ -105,14 +183,14 @@ impl RestApi {
 async fn root_info() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "title": "DistX - Fast Vector Database",
-        "version": "0.1.0"
+        "version": "0.2.0"
     })))
 }
 
 async fn health_check() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "title": "DistX",
-        "version": "0.1.0"
+        "version": "0.2.0"
     })))
 }
 
@@ -739,6 +817,129 @@ async fn collection_exists(
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "result": {
             "exists": exists
+        }
+    })))
+}
+
+// Qdrant compatibility endpoints
+
+async fn list_aliases() -> ActixResult<HttpResponse> {
+    // DistX doesn't support aliases yet, return empty list
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "aliases": []
+        }
+    })))
+}
+
+async fn cluster_info() -> ActixResult<HttpResponse> {
+    // DistX runs as single node, return minimal cluster info
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "status": "enabled",
+            "peer_id": 1,
+            "peers": {
+                "1": {
+                    "uri": "http://localhost:6335"
+                }
+            },
+            "raft_info": {
+                "term": 0,
+                "commit": 0,
+                "pending_operations": 0,
+                "leader": 1,
+                "role": "Leader"
+            },
+            "consensus_thread_status": {
+                "consensus_thread_status": "working"
+            },
+            "message_send_failures": {}
+        }
+    })))
+}
+
+async fn telemetry_info() -> ActixResult<HttpResponse> {
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "id": "distx-single-node",
+            "app": {
+                "name": "distx",
+                "version": "0.2.0"
+            }
+        }
+    })))
+}
+
+// Snapshot endpoints (stubs - feature not fully implemented)
+
+async fn list_snapshots(
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let _collection_name = path.into_inner();
+    // Return empty list - snapshots not implemented yet
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": []
+    })))
+}
+
+async fn list_all_snapshots() -> ActixResult<HttpResponse> {
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": []
+    })))
+}
+
+async fn create_snapshot(
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
+        "status": {
+            "error": format!("Snapshot creation not yet implemented for collection '{}'", collection_name)
+        }
+    })))
+}
+
+#[derive(Deserialize)]
+struct RecoverSnapshotRequest {
+    location: String,
+    #[serde(default)]
+    priority: Option<String>,
+}
+
+async fn recover_snapshot(
+    path: web::Path<String>,
+    req: web::Json<RecoverSnapshotRequest>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
+        "status": {
+            "error": format!(
+                "Remote snapshot recovery not yet implemented. Cannot recover '{}' for collection '{}'. Please use the REST API to create collections and upload points directly.",
+                req.location,
+                collection_name
+            )
+        }
+    })))
+}
+
+async fn get_snapshot(
+    path: web::Path<(String, String)>,
+) -> ActixResult<HttpResponse> {
+    let (collection_name, snapshot_name) = path.into_inner();
+    Ok(HttpResponse::NotFound().json(serde_json::json!({
+        "status": {
+            "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
+        }
+    })))
+}
+
+async fn delete_snapshot(
+    path: web::Path<(String, String)>,
+) -> ActixResult<HttpResponse> {
+    let (collection_name, snapshot_name) = path.into_inner();
+    Ok(HttpResponse::NotFound().json(serde_json::json!({
+        "status": {
+            "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
         }
     })))
 }

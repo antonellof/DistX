@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     info!("DistX started successfully");
-    info!("HTTP API: http://localhost:{}/", args.http_port);
+    info!("REST API: http://localhost:{}/", args.http_port);
+    info!("Web UI:   http://localhost:{}/dashboard", args.http_port);
     info!("gRPC API: localhost:{}", args.grpc_port);
 
     tokio::select! {

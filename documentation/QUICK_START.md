@@ -2,9 +2,33 @@
 
 This guide will help you get DistX up and running quickly.
 
-## Prerequisites
+## Quick Start with Docker (Recommended)
 
-### Install Rust
+The fastest way to get started - no compilation required:
+
+```bash
+# Pull and run DistX
+docker run -p 6333:6333 -p 6334:6334 \
+    -v "$(pwd)/distx_storage:/qdrant/storage" \
+    distx/distx:latest
+```
+
+DistX is now accessible at:
+- **REST API**: http://localhost:6333
+- **Web UI**: http://localhost:6333/dashboard
+- **gRPC API**: localhost:6334
+
+Open the [Web Dashboard](http://localhost:6333/dashboard) to visually manage your vector database!
+
+For more Docker options, see [Docker Deployment Guide](DOCKER.md).
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+#### Install Rust
 
 If you don't have Rust installed:
 
@@ -20,7 +44,7 @@ rustc --version
 cargo --version
 ```
 
-### Install LMDB
+#### Install LMDB
 
 DistX uses LMDB for fast persistence. Install it based on your platform:
 
