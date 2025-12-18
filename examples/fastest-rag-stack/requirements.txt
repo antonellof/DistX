@@ -1,0 +1,18 @@
+# Core dependencies
+streamlit>=1.28.0
+qdrant-client>=1.7.0
+python-dotenv>=1.0.0
+
+# OpenAI - for embeddings and LLM
+openai>=1.0.0
+
+# LlamaIndex core
+llama-index-core>=0.10.0
+
+# LlamaIndex LLM (OpenAI)
+llama-index-llms-openai>=0.1.0
+
+# Document parsing
+PyMuPDF>=1.23.0       # PDF extraction (best)
+pypdf>=3.0.0          # PDF extraction (fallback)
+python-docx>=0.8.11   # Word document extraction

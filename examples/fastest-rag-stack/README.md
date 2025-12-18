@@ -1,0 +1,151 @@
+# RAG Application with DistX
+
+This project builds a fast RAG application to **chat with your docs**.
+We use:
+- **OpenAI** as the LLM inference engine (GPT-5 mini by default).
+- LlamaIndex for orchestrating the RAG app.
+- **DistX** VectorDB for storing the embeddings (fast in-memory vector database).
+- Streamlit to build the UI.
+
+## Installation and setup
+
+**Setup OpenAI**:
+
+1. **Get an API key** from [OpenAI](https://platform.openai.com/)
+2. **Set environment variable**:
+   ```bash
+   export OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>
+   ```
+
+   The app uses OpenAI with `gpt-5-mini` by default. No other configuration needed!
+
+   **Available models**: `gpt-5-mini`, `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo`, etc.
+
+   **To use a different model**:
+   ```bash
+   export LLM_MODEL=gpt-4o  # or any other OpenAI model
+   ```
+
+**Setup DistX VectorDB**
+
+DistX is a fast, in-memory vector database with Qdrant API compatibility.
+
+**Option 1: Auto-download (Recommended)**
+
+The `start.sh` script automatically downloads the correct binary for your platform:
+```bash
+./start.sh  # Downloads DistX if not present, starts everything
+```
+
+**Option 2: Install from crates.io**
+```bash
+cargo install distx
+
+# Run
+distx --http-port 6333 --grpc-port 6334
+```
+
+**Option 3: Download pre-built binary**
+```bash
+# macOS Apple Silicon
+curl -LO https://github.com/antonellof/DistX/releases/latest/download/distx-macos-arm64.tar.gz
+tar -xzf distx-macos-arm64.tar.gz
+
+# macOS Intel
+curl -LO https://github.com/antonellof/DistX/releases/latest/download/distx-macos-x86_64.tar.gz
+tar -xzf distx-macos-x86_64.tar.gz
+
+# Linux x86_64
+curl -LO https://github.com/antonellof/DistX/releases/latest/download/distx-linux-x86_64.tar.gz
+tar -xzf distx-linux-x86_64.tar.gz
+
+# Linux x86_64 (static/musl)
+curl -LO https://github.com/antonellof/DistX/releases/latest/download/distx-linux-x86_64-musl.tar.gz
+tar -xzf distx-linux-x86_64-musl.tar.gz
+
+# Run
+./distx/distx --http-port 6333 --grpc-port 6334
+```
+
+**Option 4: Build from source**
+```bash
+git clone https://github.com/antonellof/DistX.git
+cd DistX
+cargo build --release
+./target/release/distx --http-port 6333 --grpc-port 6334
+```
+
+The server will start on `http://localhost:6333` (same port as Qdrant for compatibility).
+
+**Install Dependencies**:
+   Ensure you have Python 3.11 or later installed.
+   ```bash
+   # Install all dependencies from requirements.txt
+   pip install -r requirements.txt
+   ```
+   
+   Or install individually:
+   ```bash
+   pip install streamlit qdrant-client python-dotenv
+   pip install llama-index-core llama-index-embeddings-huggingface llama-index-llms-openai
+   pip install torch transformers sentence-transformers
+   ```
+
+   Note: We use `qdrant-client` library which works with DistX due to Qdrant API compatibility.
+
+   **Note on torchvision warning:** If you see a torchvision warning about image extensions, you can safely ignore it. The RAG stack only uses text embeddings, not image processing. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for details.
+
+**Quick Start**:
+
+The easiest way to run everything:
+```bash
+export OPENAI_API_KEY=your-key-here
+./start.sh
+```
+
+This will:
+1. Download DistX automatically (if not present)
+2. Start the DistX vector database
+3. Launch the Streamlit app
+
+The app will open in your browser at `http://localhost:8501`
+
+**Manual Start** (if you prefer):
+
+1. **Start DistX server** (in one terminal):
+   ```bash
+   distx --http-port 6333 --grpc-port 6334
+   ```
+
+2. **Run the RAG app** (in another terminal):
+   ```bash
+   streamlit run app.py
+   ```
+
+**Troubleshooting**:
+   If the app doesn't start, run the diagnostic script:
+   ```bash
+   python3 run_test.py
+   ```
+   
+   This will check:
+   - All dependencies are installed
+   - DistX server is running
+   - OpenAI API key is set
+   - App syntax is valid
+
+**Environment Variables** (create a `.env` file):
+
+```bash
+# Required: OpenAI API key
+OPENAI_API_KEY=your-openai-api-key-here
+
+# Optional: change model (default: gpt-5-mini)
+# LLM_MODEL=gpt-4o-mini  # or gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.
+```
+
+
+---
+## Contribution
+
+Contributions are welcome! Please fork the repository and submit a pull request with your improvements.
