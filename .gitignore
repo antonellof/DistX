@@ -162,3 +162,6 @@ secrets.json
 .cache/
 tmp/
 temp/
+
+# Release builds
+/releases/
