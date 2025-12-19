@@ -61,6 +61,9 @@ impl From<MultiVector> for VectorData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Point {
     pub id: PointId,
+    /// Version number - incremented on each update
+    #[serde(default)]
+    pub version: u64,
     /// Vector data - backwards compatible field name
     #[serde(alias = "vectors")]
     pub vector: Vector,
@@ -113,6 +116,7 @@ impl Point {
     pub fn new(id: PointId, vector: Vector, payload: Option<serde_json::Value>) -> Self {
         Self {
             id,
+            version: 0,
             vector,
             multivector: None,
             payload,
@@ -127,6 +131,7 @@ impl Point {
         let vector = multivector.to_single_vector();
         Self {
             id,
+            version: 0,
             vector,
             multivector: Some(multivector),
             payload,

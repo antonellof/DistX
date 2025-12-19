@@ -144,17 +144,31 @@ impl Collection {
 
         let id_str = point.id.to_string();
         
+        // Check if point exists and get its current version
+        let new_version = {
+            let points = self.points.read();
+            if let Some(existing) = points.get(&id_str) {
+                existing.version + 1
+            } else {
+                0
+            }
+        };
+        
+        // Create point with updated version
+        let mut versioned_point = point;
+        versioned_point.version = new_version;
+        
         let in_batch = *self.batch_mode.read();
         if in_batch {
-            self.points.write().insert(id_str.clone(), point.clone());
-            self.pending_points.write().push(point);
+            self.points.write().insert(id_str.clone(), versioned_point.clone());
+            self.pending_points.write().push(versioned_point);
             return Ok(());
         }
         
         if let Some(hnsw) = &self.hnsw {
             let built = *self.hnsw_built.read();
             if built {
-                let mut normalized_point = point.clone();
+                let mut normalized_point = versioned_point.clone();
                 normalized_point.vector.normalize();
                 
                 let mut index = hnsw.write();
@@ -163,7 +177,7 @@ impl Collection {
         }
 
         if let Some(bm25) = &self.bm25 {
-            if let Some(payload) = &point.payload {
+            if let Some(payload) = &versioned_point.payload {
                 if let Some(text) = payload.get("text").and_then(|v| v.as_str()) {
                     let mut index = bm25.write();
                     index.insert_doc(&id_str, text);
@@ -171,7 +185,7 @@ impl Collection {
             }
         }
 
-        self.points.write().insert(id_str, point);
+        self.points.write().insert(id_str, versioned_point);
         Ok(())
     }
 

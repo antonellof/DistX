@@ -1,6 +1,6 @@
 [package]
 name = "distx-core"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Core library for DistX vector database - HNSW indexing, SIMD operations, BM25 search"

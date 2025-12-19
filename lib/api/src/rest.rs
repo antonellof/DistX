@@ -3,7 +3,7 @@ use actix_cors::Cors;
 use actix_files::Files;
 use actix_multipart::Multipart;
 use chrono::Utc;
-use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
+use distx_core::{CollectionConfig, Collection, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
@@ -713,7 +713,7 @@ async fn search_points(
                 collection.get(&doc_id).map(|point| {
                     let mut result = serde_json::json!({
                         "id": point_id_to_json(&point.id),
-                        "version": 0,
+                        "version": point.version,
                         "score": score,
                     });
                     if with_payload {
@@ -750,7 +750,7 @@ async fn search_points(
             .map(|(point, score)| {
                 let mut result = serde_json::json!({
                     "id": point_id_to_json(&point.id),
-                    "version": 0,
+                    "version": point.version,
                     "score": score,
                 });
                 if with_payload {
@@ -778,11 +778,24 @@ fn point_id_to_json(id: &distx_core::PointId) -> serde_json::Value {
     }
 }
 
+/// Prefetch query for hybrid search
+#[derive(Deserialize, Clone)]
+struct PrefetchQuery {
+    /// Query vector or sparse vector
+    query: serde_json::Value,
+    #[serde(default)]
+    using: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
 /// Query request for Qdrant's universal query API
 /// Supports both single vectors and multivectors (ColBERT-style MaxSim)
 #[derive(Deserialize)]
 struct QueryRequest {
-    /// Query vector - can be single [f32] or multi [[f32]]
+    /// Query vector - can be single [f32], multi [[f32]], or fusion object {"fusion": "rrf"}
     query: serde_json::Value,
     #[serde(default)]
     limit: Option<usize>,
@@ -792,10 +805,16 @@ struct QueryRequest {
     with_vector: Option<bool>,
     #[serde(default)]
     filter: Option<serde_json::Value>,
+    /// Prefetch queries for hybrid search
+    #[serde(default)]
+    prefetch: Option<Vec<PrefetchQuery>>,
+    /// Which named vector to use
+    #[serde(default)]
+    using: Option<String>,
 }
 
 /// Query points using Qdrant's universal query API
-/// Supports multivector queries with MaxSim scoring
+/// Supports multivector queries with MaxSim scoring, prefetch, and fusion
 async fn query_points(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
@@ -815,121 +834,27 @@ async fn query_points(
     let with_payload = req.with_payload.unwrap_or(true);
     let with_vector = req.with_vector.unwrap_or(false);
     
-    // Parse filter if provided
-    let filter: Option<Box<dyn Filter>> = req.filter.as_ref().and_then(|f| {
-        parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
-    });
+    // Check if this is a fusion query with prefetch
+    let is_fusion = req.query.as_object()
+        .and_then(|o| o.get("fusion"))
+        .is_some();
     
-    // Determine query type: point ID, single vector, or multivector
-    let results = match &req.query {
-        // Query by point ID (nearest to existing point)
-        serde_json::Value::Number(n) => {
-            let point_id_str = if let Some(id) = n.as_u64() {
-                id.to_string()
-            } else if let Some(id) = n.as_i64() {
-                id.to_string()
-            } else {
-                return Ok(qdrant_error("Invalid point ID format", start_time));
-            };
-            
-            // Get the point by ID and use its vector for search
-            if let Some(source_point) = collection.get(&point_id_str) {
-                let query_vector = source_point.vector.clone();
-                let mut search_results = if let Some(f) = filter.as_deref() {
-                    collection.search(&query_vector, limit + 1, Some(f))
-                } else {
-                    collection.search(&query_vector, limit + 1, None)
-                };
-                // Remove the source point from results
-                search_results.retain(|(p, _)| p.id.to_string() != point_id_str);
-                search_results.truncate(limit);
-                search_results
-            } else {
-                return Ok(qdrant_not_found(&format!("Point with ID '{}' not found", point_id_str), start_time));
-            }
+    let results = if is_fusion && req.prefetch.is_some() {
+        // Handle hybrid search with prefetch and fusion
+        match execute_fusion_query(&collection, &req, limit) {
+            Ok(r) => r,
+            Err(e) => return Ok(qdrant_error(&e, start_time)),
         }
-        // Query by string point ID
-        serde_json::Value::String(s) => {
-            if let Some(source_point) = collection.get(s) {
-                let query_vector = source_point.vector.clone();
-                let mut search_results = if let Some(f) = filter.as_deref() {
-                    collection.search(&query_vector, limit + 1, Some(f))
-                } else {
-                    collection.search(&query_vector, limit + 1, None)
-                };
-                // Remove the source point from results
-                search_results.retain(|(p, _)| p.id.to_string() != *s);
-                search_results.truncate(limit);
-                search_results
-            } else {
-                return Ok(qdrant_not_found(&format!("Point with ID '{}' not found", s), start_time));
-            }
-        }
-        serde_json::Value::Array(arr) if !arr.is_empty() => {
-            match arr.first() {
-                // Multivector: [[0.1, 0.2], [0.3, 0.4]]
-                Some(serde_json::Value::Array(_)) => {
-                    // Parse multivector
-                    let multivec_data: Result<Vec<Vec<f32>>, _> = arr.iter()
-                        .map(|sub| {
-                            if let serde_json::Value::Array(sub_arr) = sub {
-                                sub_arr.iter()
-                                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
-                                    .collect::<Result<Vec<f32>, _>>()
-                            } else {
-                                Err("expected array")
-                            }
-                        })
-                        .collect();
-                    
-                    match multivec_data {
-                        Ok(data) => {
-                            match MultiVector::new(data) {
-                                Ok(query_mv) => {
-                                    // Use MaxSim search
-                                    if let Some(f) = filter.as_deref() {
-                                        collection.search_multivector(&query_mv, limit, Some(f))
-                                    } else {
-                                        collection.search_multivector(&query_mv, limit, None)
-                                    }
-                                }
-                                Err(e) => {
-                                    return Ok(qdrant_error(&format!("Invalid multivector: {}", e), start_time));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            return Ok(qdrant_error(&format!("Invalid multivector format: {}", e), start_time));
-                        }
-                    }
-                }
-                // Single vector: [0.1, 0.2, 0.3]
-                Some(serde_json::Value::Number(_)) => {
-                    let vector_data: Result<Vec<f32>, _> = arr.iter()
-                        .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
-                        .collect();
-                    
-                    match vector_data {
-                        Ok(data) => {
-                            let query_vector = Vector::new(data);
-                            if let Some(f) = filter.as_deref() {
-                                collection.search(&query_vector, limit, Some(f))
-                            } else {
-                                collection.search(&query_vector, limit, None)
-                            }
-                        }
-                        Err(e) => {
-                            return Ok(qdrant_error(&format!("Invalid vector: {}", e), start_time));
-                        }
-                    }
-                }
-                _ => {
-                    return Ok(qdrant_error("Invalid query format", start_time));
-                }
-            }
-        }
-        _ => {
-            return Ok(qdrant_error("Query must be a vector array or point ID", start_time));
+    } else {
+        // Parse filter if provided
+        let filter: Option<Box<dyn Filter>> = req.filter.as_ref().and_then(|f| {
+            parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
+        });
+        
+        // Determine query type: point ID, single vector, or multivector
+        match execute_simple_query(&collection, &req.query, limit, filter.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return Ok(qdrant_error(&e, start_time)),
         }
     };
     
@@ -939,7 +864,7 @@ async fn query_points(
         .map(|(point, score)| {
             let mut result = serde_json::json!({
                 "id": point_id_to_json(&point.id),
-                "version": 0,
+                "version": point.version,
                 "score": score,
             });
             
@@ -961,6 +886,168 @@ async fn query_points(
     Ok(qdrant_response(serde_json::json!({
         "points": search_results
     }), start_time))
+}
+
+/// Execute a fusion query with prefetch (RRF - Reciprocal Rank Fusion)
+fn execute_fusion_query(
+    collection: &Arc<Collection>,
+    req: &QueryRequest,
+    limit: usize,
+) -> Result<Vec<(Point, f32)>, String> {
+    use std::collections::HashMap;
+    
+    let prefetch = req.prefetch.as_ref().ok_or("Fusion requires prefetch")?;
+    
+    // Execute each prefetch query and collect ranked results
+    let mut all_results: Vec<Vec<(Point, f32)>> = Vec::new();
+    
+    for pf in prefetch {
+        let pf_limit = pf.limit.unwrap_or(20);
+        let filter: Option<Box<dyn Filter>> = pf.filter.as_ref().and_then(|f| {
+            parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
+        });
+        
+        // Parse the prefetch query
+        let pf_results = parse_and_search(collection, &pf.query, pf_limit, filter.as_deref())?;
+        all_results.push(pf_results);
+    }
+    
+    // Apply RRF (Reciprocal Rank Fusion)
+    // RRF score = sum(1 / (k + rank_i)) for each result set
+    // k is typically 60
+    const K: f32 = 60.0;
+    
+    let mut rrf_scores: HashMap<String, (Point, f32)> = HashMap::new();
+    
+    for result_set in &all_results {
+        for (rank, (point, _original_score)) in result_set.iter().enumerate() {
+            let rrf_contribution = 1.0 / (K + rank as f32 + 1.0);
+            let point_id = point.id.to_string();
+            
+            rrf_scores
+                .entry(point_id)
+                .and_modify(|(_, score)| *score += rrf_contribution)
+                .or_insert_with(|| (point.clone(), rrf_contribution));
+        }
+    }
+    
+    // Sort by RRF score descending
+    let mut fused: Vec<(Point, f32)> = rrf_scores.into_values().collect();
+    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    fused.truncate(limit);
+    
+    Ok(fused)
+}
+
+/// Parse a query value and execute search
+fn parse_and_search(
+    collection: &Arc<Collection>,
+    query: &serde_json::Value,
+    limit: usize,
+    filter: Option<&dyn Filter>,
+) -> Result<Vec<(Point, f32)>, String> {
+    match query {
+        // Sparse vector format: {"indices": [...], "values": [...]}
+        serde_json::Value::Object(obj) if obj.contains_key("indices") && obj.contains_key("values") => {
+            let values = obj.get("values")
+                .and_then(|v| v.as_array())
+                .ok_or("Invalid sparse vector: missing values")?;
+            
+            let vector_data: Vec<f32> = values.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            
+            if vector_data.is_empty() {
+                return Ok(Vec::new());
+            }
+            
+            let query_vector = Vector::new(vector_data);
+            Ok(collection.search(&query_vector, limit, filter))
+        }
+        // Array: single vector or multivector
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr.first() {
+                // Multivector: [[0.1, 0.2], [0.3, 0.4]]
+                Some(serde_json::Value::Array(_)) => {
+                    let multivec_data: Result<Vec<Vec<f32>>, _> = arr.iter()
+                        .map(|sub| {
+                            if let serde_json::Value::Array(sub_arr) = sub {
+                                sub_arr.iter()
+                                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                                    .collect::<Result<Vec<f32>, _>>()
+                            } else {
+                                Err("expected array")
+                            }
+                        })
+                        .collect();
+                    
+                    let data = multivec_data.map_err(|e| format!("Invalid multivector: {}", e))?;
+                    let query_mv = MultiVector::new(data).map_err(|e| format!("Invalid multivector: {}", e))?;
+                    Ok(collection.search_multivector(&query_mv, limit, filter))
+                }
+                // Single vector: [0.1, 0.2, 0.3]
+                Some(serde_json::Value::Number(_)) => {
+                    let vector_data: Result<Vec<f32>, _> = arr.iter()
+                        .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                        .collect();
+                    
+                    let data = vector_data.map_err(|e| format!("Invalid vector: {}", e))?;
+                    let query_vector = Vector::new(data);
+                    Ok(collection.search(&query_vector, limit, filter))
+                }
+                _ => Err("Invalid query format".to_string())
+            }
+        }
+        _ => Err("Invalid query format".to_string())
+    }
+}
+
+/// Execute a simple (non-fusion) query
+fn execute_simple_query(
+    collection: &Arc<Collection>,
+    query: &serde_json::Value,
+    limit: usize,
+    filter: Option<&dyn Filter>,
+) -> Result<Vec<(Point, f32)>, String> {
+    match query {
+        // Query by point ID (nearest to existing point)
+        serde_json::Value::Number(n) => {
+            let point_id_str = if let Some(id) = n.as_u64() {
+                id.to_string()
+            } else if let Some(id) = n.as_i64() {
+                id.to_string()
+            } else {
+                return Err("Invalid point ID format".to_string());
+            };
+            
+            // Get the point by ID and use its vector for search
+            if let Some(source_point) = collection.get(&point_id_str) {
+                let query_vector = source_point.vector.clone();
+                let mut search_results = collection.search(&query_vector, limit + 1, filter);
+                // Remove the source point from results
+                search_results.retain(|(p, _)| p.id.to_string() != point_id_str);
+                search_results.truncate(limit);
+                Ok(search_results)
+            } else {
+                Err(format!("Point with ID '{}' not found", point_id_str))
+            }
+        }
+        // Query by string point ID
+        serde_json::Value::String(s) => {
+            if let Some(source_point) = collection.get(s) {
+                let query_vector = source_point.vector.clone();
+                let mut search_results = collection.search(&query_vector, limit + 1, filter);
+                // Remove the source point from results
+                search_results.retain(|(p, _)| p.id.to_string() != *s);
+                search_results.truncate(limit);
+                Ok(search_results)
+            } else {
+                Err(format!("Point with ID '{}' not found", s))
+            }
+        }
+        // Arrays and sparse vectors
+        _ => parse_and_search(collection, query, limit, filter)
+    }
 }
 
 /// Parse Qdrant-style filter format (must/should/must_not)
@@ -1283,6 +1370,7 @@ async fn scroll_points(
     let results: Vec<serde_json::Value> = page.iter().map(|(_, point)| {
         let mut obj = serde_json::json!({
             "id": point_id_to_json(&point.id),
+            "version": point.version,
         });
         
         if with_payload {
@@ -1320,6 +1408,7 @@ async fn get_point(
             // Build response with optional multivector
             let mut result = serde_json::json!({
                 "id": point_id_to_json(&point.id),
+                "version": point.version,
                 "vector": point.vector.as_slice(),
                 "payload": point.payload.clone().unwrap_or(serde_json::Value::Null),
             });
@@ -1939,7 +2028,8 @@ async fn get_points_by_ids(
         
         if let Some(point) = collection.get(&id_str) {
             let mut result = serde_json::json!({
-                "id": id_value
+                "id": id_value,
+                "version": point.version
             });
             if with_payload {
                 result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
@@ -2660,7 +2750,7 @@ async fn discover_points(
     let scored_points: Vec<serde_json::Value> = results.into_iter().map(|(point, score)| {
         let mut result = serde_json::json!({
             "id": point_id_to_json(&point.id),
-            "version": 0,
+            "version": point.version,
             "score": score,
         });
         if with_payload {
@@ -3123,7 +3213,7 @@ async fn recommend_points(
         
         let mut result = serde_json::json!({
             "id": point_id_to_json(&point.id),
-            "version": 0,
+            "version": point.version,
             "score": score
         });
         
