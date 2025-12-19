@@ -5,17 +5,20 @@
 [![Docker](https://img.shields.io/docker/v/distx/distx?label=docker)](https://hub.docker.com/r/distx/distx)
 [![License](https://img.shields.io/crates/l/distx.svg)](https://github.com/antonellof/DistX#license)
 
-A fast, in-memory vector database written in Rust. Designed with Redis-style simplicity and Qdrant API compatibility.
+A fast, in-memory vector database written in Rust. Designed with Redis-style simplicity and full Qdrant API compatibility.
 
 ## Performance
 
-**DistX beats both Qdrant and Redis on insert AND search operations:**
+DistX delivers **comparable performance to Qdrant** with the following characteristics:
 
-| Protocol | vs Qdrant | vs Redis |
-|----------|-----------|----------|
-| **Insert (gRPC)** | 4.5x faster | 10x faster |
-| **Search (gRPC)** | 6.3x faster | 5x faster |
-| **Search Latency** | 6.6x lower | 5x lower |
+| Metric | Typical Performance |
+|--------|---------------------|
+| **Insert** | ~8,000 ops/sec |
+| **Search** | ~400-500 ops/sec |
+| **Search Latency (p50)** | ~2ms |
+| **Search Latency (p99)** | ~5ms |
+
+*Benchmarks: 5,000 vectors, 128 dimensions, Cosine distance, Docker deployment*
 
 See [Performance Benchmarks](documentation/PERFORMANCE.md) for detailed results.
 
