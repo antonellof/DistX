@@ -56,8 +56,9 @@ COPY src src/
 COPY lib lib/
 
 # Touch source files to ensure rebuild and build the actual application
+# Enable AVX2 and FMA for x86_64 SIMD performance
 RUN find src lib -name "*.rs" -exec touch {} \; && \
-    cargo build --release --bin distx
+    RUSTFLAGS="-C target-feature=+avx2,+fma -C opt-level=3" cargo build --release --bin distx
 
 # ============================================
 # Stage 2: Runtime

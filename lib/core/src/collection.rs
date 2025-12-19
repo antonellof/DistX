@@ -415,45 +415,90 @@ impl Collection {
 
     /// Fast brute-force search using SIMD - optimal for small datasets
     fn brute_force_search(&self, query: &Vector, limit: usize, filter: Option<&dyn Filter>) -> Vec<(Point, f32)> {
+        use rayon::prelude::*;
+        
         let points = self.points.read();
         let query_slice = query.as_slice();
+        let distance = self.config.distance.clone();
         
-        // Pre-allocate results with capacity
-        let mut results: Vec<(Point, f32)> = Vec::with_capacity(points.len().min(limit * 2));
+        // Collect points to a Vec for indexing
+        let point_vec: Vec<_> = points.values().collect();
         
-        for point in points.values() {
-            if let Some(f) = filter {
-                if !f.matches(point) {
-                    continue;
+        // Parallel scoring - compute scores without cloning points
+        // Only clone the final top-k results
+        // Use parallel only for 10K+ vectors (rayon has overhead)
+        let scored: Vec<(usize, f32)> = if point_vec.len() >= 10000 && filter.is_none() {
+            // Parallel path for larger datasets without filter
+            point_vec
+                .par_iter()
+                .enumerate()
+                .map(|(idx, point)| {
+                    let score = match distance {
+                        Distance::Cosine => {
+                            crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                        }
+                        Distance::Euclidean => {
+                            -crate::simd::l2_distance_simd(query_slice, point.vector.as_slice())
+                        }
+                        Distance::Dot => {
+                            crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                        }
+                    };
+                    (idx, score)
+                })
+                .collect()
+        } else {
+            // Sequential path - optimized for common case (Cosine without filter)
+            let mut results = Vec::with_capacity(point_vec.len());
+            
+            if filter.is_none() && matches!(distance, Distance::Cosine) {
+                // Hot path: Cosine without filter - avoid branching
+                for (idx, point) in point_vec.iter().enumerate() {
+                    let score = crate::simd::dot_product_simd(query_slice, point.vector.as_slice());
+                    results.push((idx, score));
+                }
+            } else {
+                // General path with filter/distance checks
+                for (idx, point) in point_vec.iter().enumerate() {
+                    if let Some(f) = filter {
+                        if !f.matches(point) {
+                            continue;
+                        }
+                    }
+                    
+                    let score = match distance {
+                        Distance::Cosine => {
+                            crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                        }
+                        Distance::Euclidean => {
+                            -crate::simd::l2_distance_simd(query_slice, point.vector.as_slice())
+                        }
+                        Distance::Dot => {
+                            crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
+                        }
+                    };
+                    
+                    results.push((idx, score));
                 }
             }
-            
-            // Use SIMD-optimized dot product for cosine similarity (vectors are normalized)
-            let score = match self.config.distance {
-                Distance::Cosine => {
-                    crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
-                }
-                Distance::Euclidean => {
-                    -crate::simd::l2_distance_simd(query_slice, point.vector.as_slice())
-                }
-                Distance::Dot => {
-                    crate::simd::dot_product_simd(query_slice, point.vector.as_slice())
-                }
-            };
-            
-            results.push((point.clone(), score));
-        }
+            results
+        };
         
-        // Use partial sort for efficiency when limit << len
-        if results.len() > limit {
-            results.select_nth_unstable_by(limit, |a, b| {
+        // Get top-k using partial sort
+        let mut scored = scored;
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
-            results.truncate(limit);
+            scored.truncate(limit);
         }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results
+        // Only clone the top-k points (avoiding cloning all points)
+        scored
+            .into_iter()
+            .map(|(idx, score)| (point_vec[idx].clone(), score))
+            .collect()
     }
 
     /// Search for similar vectors
@@ -467,8 +512,8 @@ impl Collection {
         let normalized_query = query.normalized();
         let point_count = self.points.read().len();
         
-        // Use brute-force for small datasets - faster than HNSW overhead
-        const BRUTE_FORCE_THRESHOLD: usize = 1000;
+        // Use brute-force for datasets up to 10K - SIMD is very fast and avoids HNSW overhead
+        const BRUTE_FORCE_THRESHOLD: usize = 10000;
         if point_count < BRUTE_FORCE_THRESHOLD {
             return self.brute_force_search(&normalized_query, limit, filter);
         }
