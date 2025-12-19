@@ -263,6 +263,7 @@ impl RestApi {
                 .route("/collections/{name}/points/batch", web::post().to(batch_update))
                 .route("/collections/{name}/points/search/batch", web::post().to(batch_search))
                 .route("/collections/{name}/points/query/batch", web::post().to(batch_query))
+                .route("/collections/{name}/points/query/groups", web::post().to(query_groups))
                 // Index endpoints
                 .route("/collections/{name}/index", web::put().to(create_field_index))
                 .route("/collections/{name}/index/{field_name}", web::delete().to(delete_field_index))
@@ -1620,6 +1621,133 @@ async fn batch_query(
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "result": []
+    })))
+}
+
+/// Query points with grouping
+#[derive(Deserialize)]
+struct QueryGroupsRequest {
+    query: serde_json::Value,
+    group_by: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    group_size: Option<usize>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn query_groups(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<QueryGroupsRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": { "error": "Collection not found" }
+            })));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(5);
+    let group_size = req.group_size.unwrap_or(3);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    let group_by = &req.group_by;
+    
+    // Parse query vector
+    let query_vector = match &req.query {
+        serde_json::Value::Array(arr) => {
+            let vec: Result<Vec<f32>, _> = arr.iter()
+                .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                .collect();
+            match vec {
+                Ok(v) => Vector::new(v),
+                Err(_) => {
+                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                        "status": { "error": "Invalid query vector" }
+                    })));
+                }
+            }
+        }
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                "status": { "error": "Query must be a vector array" }
+            })));
+        }
+    };
+    
+    // Search for points
+    let search_results = collection.search(&query_vector, limit * group_size * 2, None);
+    
+    // Group results by the group_by field
+    let mut groups: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    
+    for (point, score) in search_results {
+        // Get group key from payload
+        let group_key = point.payload
+            .as_ref()
+            .and_then(|p| p.get(group_by))
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        let group = groups.entry(group_key).or_default();
+        
+        // Only add if group hasn't reached group_size
+        if group.len() < group_size {
+            let mut hit = serde_json::json!({
+                "id": match &point.id {
+                    distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+                    distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
+                    distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+                },
+                "score": score
+            });
+            
+            if with_payload {
+                hit["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+            }
+            if with_vector {
+                hit["vector"] = serde_json::json!(point.vector.as_slice());
+            }
+            
+            group.push(hit);
+        }
+        
+        // Stop if we have enough groups
+        if groups.len() >= limit && groups.values().all(|g| g.len() >= group_size) {
+            break;
+        }
+    }
+    
+    // Format response
+    let group_results: Vec<serde_json::Value> = groups
+        .into_iter()
+        .take(limit)
+        .map(|(key, hits)| {
+            serde_json::json!({
+                "id": key,
+                "hits": hits
+            })
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "groups": group_results
+        }
     })))
 }
 
