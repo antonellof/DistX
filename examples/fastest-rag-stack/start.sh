@@ -1,10 +1,22 @@
 #!/bin/bash
 # Startup script for RAG Stack
+# Supports both Docker and local binary execution of DistX
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DISTX_VERSION="v0.1.1"
+DISTX_VERSION="v0.2.1"
 DISTX_BIN_DIR="$SCRIPT_DIR/.distx"
 DISTX_BIN="$DISTX_BIN_DIR/distx"
+DISTX_DATA_DIR="$SCRIPT_DIR/.distx_data"
+DISTX_DOCKER_CONTAINER="distx"
+DISTX_STARTED_BY_US=""
+DISTX_MODE=""  # "docker" or "local"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
 # Detect platform and set download URL
 detect_platform() {
@@ -35,17 +47,17 @@ download_distx() {
     local platform=$(detect_platform)
     
     if [ "$platform" = "unsupported" ]; then
-        echo "❌ Unsupported platform: $(uname -s) $(uname -m)"
+        echo -e "${RED}❌ Unsupported platform: $(uname -s) $(uname -m)${NC}"
         echo "Please build from source:"
         echo "  git clone https://github.com/antonellof/DistX.git"
         echo "  cd DistX && cargo build --release"
-        exit 1
+        return 1
     fi
     
     local download_url="https://github.com/antonellof/DistX/releases/download/${DISTX_VERSION}/distx-${platform}.tar.gz"
     local temp_file="/tmp/distx-${platform}.tar.gz"
     
-    echo "📦 Downloading DistX ${DISTX_VERSION} for ${platform}..."
+    echo -e "${BLUE}📦 Downloading DistX ${DISTX_VERSION} for ${platform}...${NC}"
     echo "   URL: $download_url"
     
     # Create bin directory
@@ -57,8 +69,8 @@ download_distx() {
     elif command -v wget &> /dev/null; then
         wget -O "$temp_file" "$download_url"
     else
-        echo "❌ Neither curl nor wget found. Please install one of them."
-        exit 1
+        echo -e "${RED}❌ Neither curl nor wget found. Please install one of them.${NC}"
+        return 1
     fi
     
     # Extract to temp dir first
@@ -72,10 +84,10 @@ download_distx() {
         cp "$temp_extract/distx/distx" "$DISTX_BIN"
         rm -rf "$temp_extract"
     else
-        echo "❌ Binary not found in archive"
+        echo -e "${RED}❌ Binary not found in archive${NC}"
         ls -la "$temp_extract"
         rm -rf "$temp_extract"
-        exit 1
+        return 1
     fi
     
     # Make executable
@@ -84,74 +96,229 @@ download_distx() {
     # Cleanup
     rm -f "$temp_file"
     
-    echo "✅ DistX installed to $DISTX_BIN"
+    echo -e "${GREEN}✅ DistX installed to $DISTX_BIN${NC}"
+    return 0
 }
 
-echo "Starting RAG Stack with DistX..."
+# Check if Docker is available
+is_docker_available() {
+    command -v docker &> /dev/null && docker info &> /dev/null
+}
+
+# Check if DistX is running via Docker
+is_distx_docker_running() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${DISTX_DOCKER_CONTAINER}$"
+}
+
+# Check if DistX is responding on port 6333
+is_distx_responding() {
+    curl -s http://localhost:6333/healthz > /dev/null 2>&1
+}
+
+# Start DistX via Docker
+start_distx_docker() {
+    echo -e "${BLUE}🐳 Starting DistX via Docker...${NC}"
+    
+    # Remove existing stopped container if any
+    docker rm -f "$DISTX_DOCKER_CONTAINER" 2>/dev/null
+    
+    # Create data directory
+    mkdir -p "$DISTX_DATA_DIR"
+    
+    # Start container
+    docker run -d \
+        --name "$DISTX_DOCKER_CONTAINER" \
+        -p 6333:6333 \
+        -p 6334:6334 \
+        -v "$DISTX_DATA_DIR:/qdrant/storage" \
+        distx:latest > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        DISTX_STARTED_BY_US="docker"
+        DISTX_MODE="docker"
+        return 0
+    else
+        # Try pulling from registry if local image not found
+        echo "   Local image not found, trying to pull..."
+        docker pull distx/distx:latest 2>/dev/null || docker pull ghcr.io/antonellof/distx:latest 2>/dev/null
+        docker run -d \
+            --name "$DISTX_DOCKER_CONTAINER" \
+            -p 6333:6333 \
+            -p 6334:6334 \
+            -v "$DISTX_DATA_DIR:/qdrant/storage" \
+            distx/distx:latest > /dev/null 2>&1
+        
+        if [ $? -eq 0 ]; then
+            DISTX_STARTED_BY_US="docker"
+            DISTX_MODE="docker"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# Start DistX via local binary
+start_distx_local() {
+    echo -e "${BLUE}📁 Starting DistX via local binary...${NC}"
+    
+    # Download if not exists
+    if [ ! -f "$DISTX_BIN" ]; then
+        echo "DistX binary not found. Downloading..."
+        if ! download_distx; then
+            return 1
+        fi
+    fi
+    
+    # Create data directory
+    mkdir -p "$DISTX_DATA_DIR"
+    
+    # Start in background
+    "$DISTX_BIN" --http-port 6333 --grpc-port 6334 --data-dir "$DISTX_DATA_DIR" > /tmp/distx.log 2>&1 &
+    DISTX_PID=$!
+    
+    DISTX_STARTED_BY_US="local:$DISTX_PID"
+    DISTX_MODE="local"
+    echo "   Started DistX (PID: $DISTX_PID)"
+    return 0
+}
+
+# Wait for DistX to be ready
+wait_for_distx() {
+    echo "   Waiting for DistX to start..."
+    for i in {1..15}; do
+        if is_distx_responding; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Cleanup function
+cleanup() {
+    echo ""
+    echo "Shutting down..."
+    
+    if [ -n "$DISTX_STARTED_BY_US" ]; then
+        if [[ "$DISTX_STARTED_BY_US" == "docker" ]]; then
+            echo "Stopping DistX Docker container..."
+            docker stop "$DISTX_DOCKER_CONTAINER" > /dev/null 2>&1
+            docker rm "$DISTX_DOCKER_CONTAINER" > /dev/null 2>&1
+        elif [[ "$DISTX_STARTED_BY_US" == local:* ]]; then
+            local pid="${DISTX_STARTED_BY_US#local:}"
+            echo "Stopping DistX (PID: $pid)..."
+            kill "$pid" 2>/dev/null
+        fi
+    fi
+}
+trap cleanup EXIT
+
+# ============================================================================
+# Main Script
+# ============================================================================
+
+echo ""
+echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║           🚀 Starting RAG Stack with DistX 🚀              ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Kill any existing DistX processes first
-if pgrep -f "distx" > /dev/null 2>&1; then
-    echo "Killing existing DistX processes..."
-    pkill -9 -f "distx" 2>/dev/null
-    sleep 2
-fi
-
-# Also kill any process using port 6333
-if lsof -ti:6333 > /dev/null 2>&1; then
-    echo "Killing process on port 6333..."
-    lsof -ti:6333 | xargs kill -9 2>/dev/null
-    sleep 1
-fi
-
-# Check if DistX binary exists, download if not
-if [ ! -f "$DISTX_BIN" ]; then
-    echo "DistX binary not found. Downloading from GitHub releases..."
-    download_distx
-fi
-
-# Check if DistX is running
-if ! curl -s http://localhost:6333/collections > /dev/null 2>&1; then
-    echo "Starting DistX server..."
-    
-    if [ -f "$DISTX_BIN" ]; then
-        # Use persistent data directory
-        DISTX_DATA_DIR="$SCRIPT_DIR/.distx_data"
-        mkdir -p "$DISTX_DATA_DIR"
-        
-        # Start DistX in background with persistent data dir
-        "$DISTX_BIN" --http-port 6333 --grpc-port 6334 --data-dir "$DISTX_DATA_DIR" > /tmp/distx.log 2>&1 &
-        DISTX_PID=$!
-        echo "Started DistX (PID: $DISTX_PID)"
-        
-        # Wait for DistX to be ready
-        echo "Waiting for DistX to start..."
-        for i in {1..10}; do
-            if curl -s http://localhost:6333/collections > /dev/null 2>&1; then
-                echo "✅ DistX is ready!"
-                break
-            fi
-            sleep 1
-        done
-        
-        if ! curl -s http://localhost:6333/collections > /dev/null 2>&1; then
-            echo "⚠️  DistX didn't start properly. Check /tmp/distx.log"
-            echo ""
-            cat /tmp/distx.log | tail -20
-            echo ""
-            read -p "Press Enter to continue anyway, or Ctrl+C to exit..."
-        fi
+# Check if DistX is already running
+if is_distx_responding; then
+    # Check if it's running via Docker
+    if is_distx_docker_running; then
+        echo -e "${GREEN}✅ DistX is already running via Docker (container: $DISTX_DOCKER_CONTAINER)${NC}"
+        DISTX_MODE="docker"
     else
-        echo "❌ DistX binary not found and download failed."
-        exit 1
+        echo -e "${GREEN}✅ DistX is already running (local or external)${NC}"
+        DISTX_MODE="external"
     fi
 else
-    echo "✅ DistX is already running"
+    # DistX is not running - ask user how to start it
+    echo -e "${YELLOW}DistX is not running. How would you like to start it?${NC}"
+    echo ""
+    
+    # Check what options are available
+    DOCKER_AVAILABLE=false
+    LOCAL_AVAILABLE=false
+    
+    if is_docker_available; then
+        DOCKER_AVAILABLE=true
+        echo "  1) 🐳 Docker (recommended - easy setup)"
+    fi
+    
+    if [ -f "$DISTX_BIN" ]; then
+        LOCAL_AVAILABLE=true
+        echo "  2) 📁 Local binary (already downloaded)"
+    else
+        LOCAL_AVAILABLE=true
+        echo "  2) 📁 Local binary (will download from GitHub)"
+    fi
+    
+    echo "  3) ❌ Exit"
+    echo ""
+    
+    # Default choice
+    if $DOCKER_AVAILABLE; then
+        DEFAULT_CHOICE=1
+    else
+        DEFAULT_CHOICE=2
+    fi
+    
+    read -p "Enter choice [default: $DEFAULT_CHOICE]: " choice
+    choice=${choice:-$DEFAULT_CHOICE}
+    
+    case $choice in
+        1)
+            if ! $DOCKER_AVAILABLE; then
+                echo -e "${RED}❌ Docker is not available. Please install Docker or choose local binary.${NC}"
+                exit 1
+            fi
+            
+            if start_distx_docker; then
+                if wait_for_distx; then
+                    echo -e "${GREEN}✅ DistX started successfully via Docker!${NC}"
+                else
+                    echo -e "${RED}❌ DistX failed to start. Check Docker logs:${NC}"
+                    docker logs "$DISTX_DOCKER_CONTAINER" 2>&1 | tail -20
+                    exit 1
+                fi
+            else
+                echo -e "${RED}❌ Failed to start DistX via Docker${NC}"
+                exit 1
+            fi
+            ;;
+        2)
+            if start_distx_local; then
+                if wait_for_distx; then
+                    echo -e "${GREEN}✅ DistX started successfully!${NC}"
+                else
+                    echo -e "${RED}❌ DistX failed to start. Check /tmp/distx.log:${NC}"
+                    cat /tmp/distx.log | tail -20
+                    exit 1
+                fi
+            else
+                echo -e "${RED}❌ Failed to start DistX${NC}"
+                exit 1
+            fi
+            ;;
+        3)
+            echo "Exiting..."
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Exiting.${NC}"
+            exit 1
+            ;;
+    esac
 fi
+
+echo ""
 
 # Check OpenAI API key
 if [ -z "$OPENAI_API_KEY" ]; then
-    echo "⚠️  OPENAI_API_KEY is not set!"
+    echo -e "${YELLOW}⚠️  OPENAI_API_KEY is not set!${NC}"
     echo ""
     echo "Please set it:"
     echo "  export OPENAI_API_KEY=your-key-here"
@@ -159,20 +326,13 @@ if [ -z "$OPENAI_API_KEY" ]; then
     read -p "Press Enter to continue anyway, or Ctrl+C to exit..."
 fi
 
-# Cleanup function
-cleanup() {
-    echo ""
-    echo "Shutting down..."
-    if [ -n "$DISTX_PID" ]; then
-        echo "Stopping DistX (PID: $DISTX_PID)..."
-        kill $DISTX_PID 2>/dev/null
-    fi
-}
-trap cleanup EXIT
-
 # Start Streamlit
 echo ""
-echo "Starting Streamlit app..."
+echo -e "${BLUE}Starting Streamlit app...${NC}"
 echo "The app will open in your browser at http://localhost:8501"
 echo ""
-streamlit run app.py
+echo -e "${GREEN}DistX API: http://localhost:6333${NC}"
+echo -e "${GREEN}DistX Dashboard: http://localhost:6333/dashboard${NC}"
+echo ""
+
+streamlit run "$SCRIPT_DIR/app.py"
