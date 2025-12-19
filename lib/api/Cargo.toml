@@ -1,6 +1,6 @@
 [package]
 name = "distx-api"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.75"
 description = "REST and gRPC API for DistX vector database - Qdrant-compatible endpoints"
@@ -12,8 +12,9 @@ keywords = ["vector-database", "rest-api", "grpc", "qdrant"]
 categories = ["database", "web-programming"]
 
 [dependencies]
-distx-core = { version = "0.2.4", path = "../core" }
-distx-storage = { version = "0.2.4", path = "../storage" }
+distx-core = { version = "0.2.5", path = "../core" }
+distx-storage = { version = "0.2.5", path = "../storage" }
+distx-similarity = { version = "0.2.5", path = "../similarity" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"

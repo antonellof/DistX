@@ -3,8 +3,9 @@ use actix_cors::Cors;
 use actix_files::Files;
 use actix_multipart::Multipart;
 use chrono::Utc;
-use distx_core::{CollectionConfig, Collection, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
+use distx_core::{CollectionConfig, Collection, Distance, Point, PointId, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
+use distx_similarity::{SimilaritySchema, StructuredEmbedder, Reranker, ExplainedResult, SimilarResponse};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::path::Path;
@@ -60,6 +61,9 @@ struct CreateCollectionRequest {
     // Qdrant compatibility - sparse vectors (stored but not fully implemented)
     #[serde(default)]
     sparse_vectors: Option<serde_json::Value>,
+    // DistX extension - similarity schema for structured similarity
+    #[serde(default)]
+    similarity_schema: Option<SimilaritySchema>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -150,8 +154,9 @@ struct ParsedVector {
 #[derive(Deserialize)]
 struct PointRequest {
     id: serde_json::Value,
-    #[serde(deserialize_with = "deserialize_vector")]
-    vector: ParsedVector,
+    /// Vector is optional when using similarity schema (auto-embedding mode)
+    #[serde(default, deserialize_with = "deserialize_vector_optional")]
+    vector: Option<ParsedVector>,
     payload: Option<serde_json::Value>,
 }
 
@@ -263,6 +268,104 @@ where
     }
 }
 
+// Custom deserializer for optional vector (for similarity schema auto-embedding)
+fn deserialize_vector_optional<'de, D>(deserializer: D) -> Result<Option<ParsedVector>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    
+    // Reuse the same parsing logic
+    fn parse_simple_vector(arr: &[serde_json::Value]) -> Result<Vec<f32>, String> {
+        arr.iter()
+            .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "expected f32".to_string()))
+            .collect()
+    }
+    
+    fn parse_multivector(arr: &[serde_json::Value]) -> Result<Vec<Vec<f32>>, String> {
+        arr.iter()
+            .map(|sub| {
+                if let serde_json::Value::Array(sub_arr) = sub {
+                    parse_simple_vector(sub_arr)
+                } else {
+                    Err("expected array of arrays for multivector".to_string())
+                }
+            })
+            .collect()
+    }
+    
+    match &value {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr.first() {
+                Some(serde_json::Value::Number(_)) => {
+                    let primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
+                    Ok(Some(ParsedVector { primary, multivector: None, sparse_vectors: Vec::new() }))
+                }
+                Some(serde_json::Value::Array(_)) => {
+                    let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
+                    let primary = multivec.first().cloned().unwrap_or_default();
+                    Ok(Some(ParsedVector { primary, multivector: Some(multivec), sparse_vectors: Vec::new() }))
+                }
+                _ => Err(serde::de::Error::custom("invalid vector format"))
+            }
+        }
+        serde_json::Value::Array(_) => Ok(None), // Empty array treated as no vector
+        serde_json::Value::Object(obj) => {
+            let mut sparse_vectors = Vec::new();
+            let mut primary = vec![0.0];
+            let mut multivector = None;
+            
+            for (name, vec_value) in obj.iter() {
+                match vec_value {
+                    serde_json::Value::Array(arr) if !arr.is_empty() => {
+                        match arr.first() {
+                            Some(serde_json::Value::Number(_)) => {
+                                primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
+                            }
+                            Some(serde_json::Value::Array(_)) => {
+                                let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
+                                primary = multivec.first().cloned().unwrap_or_default();
+                                multivector = Some(multivec);
+                            }
+                            _ => {}
+                        }
+                    }
+                    serde_json::Value::Object(sparse_obj) => {
+                        if let (Some(indices_arr), Some(values_arr)) = (
+                            sparse_obj.get("indices").and_then(|i| i.as_array()),
+                            sparse_obj.get("values").and_then(|v| v.as_array())
+                        ) {
+                            let indices: Vec<u32> = indices_arr.iter()
+                                .filter_map(|i| i.as_u64().map(|n| n as u32))
+                                .collect();
+                            let values: Vec<f32> = values_arr.iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect();
+                            
+                            if !indices.is_empty() && !values.is_empty() {
+                                sparse_vectors.push(ParsedSparseVector {
+                                    name: name.clone(),
+                                    indices,
+                                    values,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            
+            Ok(Some(ParsedVector { primary, multivector, sparse_vectors }))
+        }
+        serde_json::Value::Null => Ok(None),
+        _ => Err(serde::de::Error::custom("vector must be an array, object, or null")),
+    }
+}
+
 #[derive(Deserialize)]
 struct SearchRequest {
     vector: Option<Vec<f32>>,
@@ -363,6 +466,11 @@ impl RestApi {
                 .route("/collections/{name}/index/{field_name}", web::delete().to(delete_field_index))
                 // Recommend endpoint
                 .route("/collections/{name}/points/recommend", web::post().to(recommend_points))
+                // Structured Similarity endpoints (DistX extension)
+                .route("/collections/{name}/similarity-schema", web::get().to(get_similarity_schema))
+                .route("/collections/{name}/similarity-schema", web::put().to(set_similarity_schema))
+                .route("/collections/{name}/similarity-schema", web::delete().to(delete_similarity_schema))
+                .route("/collections/{name}/similar", web::post().to(structured_similar))
                 // Snapshot endpoints (stubs for UI compatibility)
                 .route("/collections/{name}/snapshots", web::get().to(list_snapshots))
                 .route("/collections/{name}/snapshots", web::post().to(create_snapshot))
@@ -562,11 +670,16 @@ async fn create_collection(
             _ => Distance::Cosine,
         };
         (vectors.size, dist)
+    } else if req.similarity_schema.is_some() {
+        // Similarity schema mode - vector dimension computed from schema
+        let schema = req.similarity_schema.as_ref().unwrap();
+        let embedder = StructuredEmbedder::new(schema.clone());
+        (embedder.vector_dim(), Distance::Cosine)
     } else if req.sparse_vectors.is_some() {
         // Sparse-only collection - use BM25 with default text dimension
         (0, Distance::Cosine)
     } else {
-        return Ok(qdrant_error("Either 'vectors' or 'sparse_vectors' must be provided", start_time));
+        return Ok(qdrant_error("Either 'vectors', 'similarity_schema', or 'sparse_vectors' must be provided", start_time));
     };
 
     let config = CollectionConfig {
@@ -579,7 +692,17 @@ async fn create_collection(
     };
 
     match storage.create_collection(config) {
-        Ok(_) => Ok(qdrant_response(true, start_time)),
+        Ok(_) => {
+            // If similarity_schema is provided, store it
+            if let Some(schema) = req.similarity_schema.clone() {
+                if let Err(e) = storage.set_similarity_schema(&name, schema) {
+                    // Rollback collection creation on schema error
+                    let _ = storage.delete_collection(&name);
+                    return Ok(qdrant_error(&format!("Failed to set similarity schema: {}", e), start_time));
+                }
+            }
+            Ok(qdrant_response(true, start_time))
+        }
         Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
@@ -612,13 +735,16 @@ async fn upsert_points(
             return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
+    
+    // Check if collection has a similarity schema for auto-embedding
+    let embedder = storage.get_embedder(&name);
 
     let points: Result<Vec<Point>, &str> = req.points.iter().map(|point_req| {
         let id = match &point_req.id {
-            serde_json::Value::String(s) => distx_core::PointId::String(s.clone()),
+            serde_json::Value::String(s) => PointId::String(s.clone()),
             serde_json::Value::Number(n) => {
                 if let Some(u) = n.as_u64() {
-                    distx_core::PointId::Integer(u)
+                    PointId::Integer(u)
                 } else {
                     return Err("Invalid point ID");
                 }
@@ -626,30 +752,59 @@ async fn upsert_points(
             _ => return Err("Invalid point ID"),
         };
 
-        // Create point with multivector and sparse vector support
-        let mut point = if let Some(ref multivec_data) = point_req.vector.multivector {
-            // Create MultiVector and Point with multivector
-            match MultiVector::new(multivec_data.clone()) {
-                Ok(mv) => Point::new_multi(id, mv, point_req.payload.clone()),
-                Err(_) => {
-                    // Fallback to primary vector if multivector creation fails
-                    let vector = Vector::new(point_req.vector.primary.clone());
+        // Determine if vector was provided or should be auto-embedded
+        let mut point = match &point_req.vector {
+            Some(parsed_vector) => {
+                // Check if it's a placeholder vector (single zero)
+                let is_placeholder = parsed_vector.primary.len() == 1 && 
+                                     parsed_vector.primary[0] == 0.0 &&
+                                     parsed_vector.multivector.is_none() &&
+                                     parsed_vector.sparse_vectors.is_empty();
+                
+                if is_placeholder && embedder.is_some() && point_req.payload.is_some() {
+                    // Auto-embed using similarity schema
+                    let emb = embedder.as_ref().unwrap();
+                    let vector = emb.embed(point_req.payload.as_ref().unwrap());
+                    Point::new(id, vector, point_req.payload.clone())
+                } else if let Some(ref multivec_data) = parsed_vector.multivector {
+                    // Create MultiVector and Point with multivector
+                    match MultiVector::new(multivec_data.clone()) {
+                        Ok(mv) => Point::new_multi(id, mv, point_req.payload.clone()),
+                        Err(_) => {
+                            let vector = Vector::new(parsed_vector.primary.clone());
+                            Point::new(id, vector, point_req.payload.clone())
+                        }
+                    }
+                } else {
+                    // Simple dense vector
+                    let vector = Vector::new(parsed_vector.primary.clone());
                     Point::new(id, vector, point_req.payload.clone())
                 }
             }
-        } else {
-            // Simple dense vector
-            let vector = Vector::new(point_req.vector.primary.clone());
-            Point::new(id, vector, point_req.payload.clone())
+            None => {
+                // No vector provided - must auto-embed
+                if let Some(ref emb) = embedder {
+                    if let Some(ref payload) = point_req.payload {
+                        let vector = emb.embed(payload);
+                        Point::new(id, vector, point_req.payload.clone())
+                    } else {
+                        return Err("Either vector or payload with similarity schema is required");
+                    }
+                } else {
+                    return Err("Vector is required when collection has no similarity schema");
+                }
+            }
         };
         
         // Add sparse vectors if present
-        for sparse in &point_req.vector.sparse_vectors {
-            let sparse_vec = distx_core::SparseVector::new(
-                sparse.indices.clone(),
-                sparse.values.clone()
-            );
-            point.add_sparse_vector(sparse.name.clone(), sparse_vec);
+        if let Some(ref parsed_vector) = point_req.vector {
+            for sparse in &parsed_vector.sparse_vectors {
+                let sparse_vec = distx_core::SparseVector::new(
+                    sparse.indices.clone(),
+                    sparse.values.clone()
+                );
+                point.add_sparse_vector(sparse.name.clone(), sparse_vec);
+            }
         }
         
         Ok(point)
@@ -3413,5 +3568,175 @@ async fn recommend_points(
     }
 
     Ok(qdrant_response(results, start_time))
+}
+
+// ==================== Structured Similarity Endpoints ====================
+
+/// Get similarity schema for a collection
+async fn get_similarity_schema(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    if !storage.collection_exists(&name) {
+        return Ok(qdrant_not_found("Collection not found", start_time));
+    }
+    
+    match storage.get_similarity_schema(&name) {
+        Some(schema) => Ok(qdrant_response(schema, start_time)),
+        None => Ok(qdrant_not_found("Similarity schema not set for this collection", start_time)),
+    }
+}
+
+/// Set similarity schema for a collection
+async fn set_similarity_schema(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<SimilaritySchema>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    if !storage.collection_exists(&name) {
+        return Ok(qdrant_not_found("Collection not found", start_time));
+    }
+    
+    match storage.set_similarity_schema(&name, req.into_inner()) {
+        Ok(_) => Ok(qdrant_response(true, start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
+    }
+}
+
+/// Delete similarity schema for a collection
+async fn delete_similarity_schema(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    if !storage.collection_exists(&name) {
+        return Ok(qdrant_not_found("Collection not found", start_time));
+    }
+    
+    match storage.delete_similarity_schema(&name) {
+        Ok(true) => Ok(qdrant_response(true, start_time)),
+        Ok(false) => Ok(qdrant_not_found("Similarity schema not set for this collection", start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
+    }
+}
+
+/// Request for structured similarity query
+#[derive(Deserialize)]
+struct SimilarRequest {
+    /// Query by example payload
+    #[serde(default)]
+    example: Option<serde_json::Value>,
+    /// Query by existing point ID
+    #[serde(default)]
+    like_id: Option<serde_json::Value>,
+    /// Payload filter constraints
+    #[serde(default)]
+    constraints: Option<serde_json::Value>,
+    /// Custom weight overrides for fields (replaces schema weights)
+    /// Example: {"price": 0.6, "name": 0.2}
+    #[serde(default)]
+    weights: Option<std::collections::HashMap<String, f32>>,
+    /// Maximum number of results
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Include payload in results (default true)
+    #[serde(default = "default_true")]
+    with_payload: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Structured similarity query endpoint
+async fn structured_similar(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<SimilarRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    // Get collection
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+    
+    // Get similarity schema
+    let schema = match storage.get_similarity_schema(&name) {
+        Some(s) => s,
+        None => return Ok(qdrant_error("Collection does not have a similarity schema", start_time)),
+    };
+    
+    // Get embedder
+    let embedder = match storage.get_embedder(&name) {
+        Some(e) => e,
+        None => return Ok(qdrant_error("Embedder not found for collection", start_time)),
+    };
+    
+    let limit = req.limit.unwrap_or(10);
+    
+    // Determine the query payload
+    let query_payload = if let Some(ref example) = req.example {
+        example.clone()
+    } else if let Some(ref like_id) = req.like_id {
+        // Fetch the point by ID
+        let point_id = match like_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Ok(qdrant_error("Invalid like_id format", start_time)),
+        };
+        
+        match collection.get(&point_id) {
+            Some(point) => point.payload.unwrap_or(serde_json::json!({})),
+            None => return Ok(qdrant_not_found("Point not found", start_time)),
+        }
+    } else {
+        return Ok(qdrant_error("Either 'example' or 'like_id' must be provided", start_time));
+    };
+    
+    // Generate query vector
+    let query_vector = embedder.embed(&query_payload);
+    
+    // Build filter from constraints
+    let filter: Option<PayloadFilter> = if let Some(ref constraints) = req.constraints {
+        parse_filter(constraints).map(PayloadFilter::new)
+    } else {
+        None
+    };
+    
+    // ANN search with more candidates for reranking
+    let candidates_limit = limit * 5;
+    let ann_results = if let Some(ref f) = filter {
+        collection.search(&query_vector, candidates_limit, Some(f))
+    } else {
+        collection.search(&query_vector, candidates_limit, None)
+    };
+    
+    // Create reranker with optional weight overrides
+    let reranker = if let Some(ref weights) = req.weights {
+        Reranker::new(schema.clone()).with_weights(weights)
+    } else {
+        Reranker::new(schema.clone())
+    };
+    
+    // Rerank candidates
+    let mut ranked_results = reranker.rerank(&query_payload, ann_results);
+    ranked_results.truncate(limit);
+    
+    // Convert to explained results
+    let explained = ExplainedResult::from_ranked_list(ranked_results, req.with_payload);
+    let response = SimilarResponse::new(explained);
+    
+    Ok(qdrant_response(response, start_time))
 }
 

@@ -1,4 +1,5 @@
 use distx_core::{Collection, CollectionConfig, Distance, Error, Result, Point, PointId, Vector, MultiVector};
+use distx_similarity::{SimilaritySchema, StructuredEmbedder};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,10 @@ pub struct StorageManager {
     collections: Arc<RwLock<HashMap<String, Arc<Collection>>>>,
     /// Aliases: alias_name -> collection_name
     aliases: Arc<RwLock<HashMap<String, String>>>,
+    /// Similarity schemas per collection
+    similarity_schemas: Arc<RwLock<HashMap<String, SimilaritySchema>>>,
+    /// Structured embedders per collection (cached)
+    embedders: Arc<RwLock<HashMap<String, Arc<StructuredEmbedder>>>>,
     data_dir: PathBuf,
     #[allow(dead_code)]
     lmdb: Option<Arc<LmdbStorage>>,
@@ -46,6 +51,8 @@ impl StorageManager {
 
         let collections = Arc::new(RwLock::new(HashMap::new()));
         let aliases = Arc::new(RwLock::new(HashMap::new()));
+        let similarity_schemas = Arc::new(RwLock::new(HashMap::new()));
+        let embedders = Arc::new(RwLock::new(HashMap::new()));
         
         if let Some(snapshot) = persistence.load_snapshot()
             .map_err(|e| Error::Persistence(e.to_string()))? {
@@ -85,10 +92,30 @@ impl StorageManager {
             *collections.write() = collections_map;
             eprintln!("Snapshot loaded: {} collections", collections.read().len());
         }
+        
+        // Load similarity schemas from disk
+        let schemas_path = data_dir.join("similarity_schemas.json");
+        if schemas_path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&schemas_path) {
+                if let Ok(schemas) = serde_json::from_str::<HashMap<String, SimilaritySchema>>(&data) {
+                    eprintln!("Loaded {} similarity schemas", schemas.len());
+                    // Create embedders for loaded schemas
+                    for (name, schema) in &schemas {
+                        embedders.write().insert(
+                            name.clone(),
+                            Arc::new(StructuredEmbedder::new(schema.clone())),
+                        );
+                    }
+                    *similarity_schemas.write() = schemas;
+                }
+            }
+        }
 
         let manager = Self {
             collections,
             aliases,
+            similarity_schemas,
+            embedders,
             data_dir,
             lmdb: Some(lmdb),
             wal: Some(wal),
@@ -152,7 +179,16 @@ impl StorageManager {
 
     pub fn delete_collection(&self, name: &str) -> Result<bool> {
         let mut collections = self.collections.write();
-        Ok(collections.remove(name).is_some())
+        let removed = collections.remove(name).is_some();
+        
+        // Also clean up similarity schema if it exists
+        if removed {
+            self.similarity_schemas.write().remove(name);
+            self.embedders.write().remove(name);
+            let _ = self.save_similarity_schemas();
+        }
+        
+        Ok(removed)
     }
 
     #[inline]
@@ -216,6 +252,71 @@ impl StorageManager {
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    // ==================== Similarity Schema Methods ====================
+
+    /// Set similarity schema for a collection
+    pub fn set_similarity_schema(&self, collection_name: &str, mut schema: SimilaritySchema) -> Result<()> {
+        if !self.collection_exists(collection_name) {
+            return Err(Error::CollectionNotFound(collection_name.to_string()));
+        }
+        
+        // Validate and normalize the schema
+        schema.validate_and_normalize()
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        
+        // Create and cache the embedder
+        let embedder = Arc::new(StructuredEmbedder::new(schema.clone()));
+        self.embedders.write().insert(collection_name.to_string(), embedder);
+        
+        // Store the schema
+        self.similarity_schemas.write().insert(collection_name.to_string(), schema);
+        
+        // Persist schemas to disk
+        self.save_similarity_schemas()?;
+        
+        Ok(())
+    }
+
+    /// Get similarity schema for a collection
+    pub fn get_similarity_schema(&self, collection_name: &str) -> Option<SimilaritySchema> {
+        self.similarity_schemas.read().get(collection_name).cloned()
+    }
+
+    /// Check if collection has a similarity schema
+    pub fn has_similarity_schema(&self, collection_name: &str) -> bool {
+        self.similarity_schemas.read().contains_key(collection_name)
+    }
+
+    /// Get the structured embedder for a collection (if schema exists)
+    pub fn get_embedder(&self, collection_name: &str) -> Option<Arc<StructuredEmbedder>> {
+        self.embedders.read().get(collection_name).cloned()
+    }
+
+    /// Delete similarity schema for a collection
+    pub fn delete_similarity_schema(&self, collection_name: &str) -> Result<bool> {
+        let removed = self.similarity_schemas.write().remove(collection_name).is_some();
+        self.embedders.write().remove(collection_name);
+        
+        if removed {
+            self.save_similarity_schemas()?;
+        }
+        
+        Ok(removed)
+    }
+
+    /// Save similarity schemas to disk
+    fn save_similarity_schemas(&self) -> Result<()> {
+        let schemas = self.similarity_schemas.read();
+        let json = serde_json::to_string_pretty(&*schemas)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        
+        let path = self.data_dir.join("similarity_schemas.json");
+        std::fs::write(&path, json)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        
+        Ok(())
     }
 
     /// Trigger background save

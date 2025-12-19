@@ -2,6 +2,8 @@
 
 DistX provides two APIs: REST (Qdrant-compatible) and gRPC (binary protocol). The gRPC API is recommended for production workloads due to better performance.
 
+> **New Feature**: DistX includes a [Similarity Engine](SIMILARITY_ENGINE.md) for schema-driven similarity queries over tabular data. See the dedicated documentation for details.
+
 ## REST API
 
 The REST API is compatible with Qdrant's API, making it easy to migrate from Qdrant to DistX.

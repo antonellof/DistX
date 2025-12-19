@@ -1,0 +1,31 @@
+id,name,price,category,brand,in_stock
+1,Prosciutto di Parma DOP,8.99,salumi,Parma,true
+2,Prosciutto cotto,4.99,salumi,Negroni,true
+3,Prosciutto crudo San Daniele,9.49,salumi,San Daniele,true
+4,Mortadella Bologna IGP,3.99,salumi,Felsineo,true
+5,Salame Milano,5.49,salumi,Citterio,true
+6,Bresaola della Valtellina,12.99,salumi,Rigamonti,false
+7,Coppa di Parma,7.99,salumi,Parma,true
+8,Guanciale,6.49,salumi,Norcia,true
+9,Pancetta tesa,5.99,salumi,Negroni,true
+10,Speck Alto Adige,8.49,salumi,Recla,true
+11,iPhone 15 Pro Max,1199.00,electronics,Apple,true
+12,iPhone 15,999.00,electronics,Apple,true
+13,Samsung Galaxy S24 Ultra,1149.00,electronics,Samsung,true
+14,Samsung Galaxy S24,849.00,electronics,Samsung,true
+15,Google Pixel 8 Pro,999.00,electronics,Google,true
+16,MacBook Pro 14,1999.00,electronics,Apple,false
+17,Dell XPS 15,1799.00,electronics,Dell,true
+18,Sony WH-1000XM5,349.00,electronics,Sony,true
+19,AirPods Pro 2,249.00,electronics,Apple,true
+20,Parmigiano Reggiano DOP,18.99,cheese,Parma,true
+21,Grana Padano DOP,14.99,cheese,Latteria,true
+22,Mozzarella di Bufala,6.99,cheese,Campana,true
+23,Gorgonzola DOP,8.49,cheese,Igor,true
+24,Pecorino Romano DOP,12.99,cheese,Brunelli,true
+25,Taleggio DOP,9.99,cheese,Arrigoni,false
+26,Barilla Spaghetti No.5,1.99,pasta,Barilla,true
+27,De Cecco Penne Rigate,2.49,pasta,De Cecco,true
+28,Rummo Linguine,2.99,pasta,Rummo,true
+29,Garofalo Fusilli,2.29,pasta,Garofalo,true
+30,Voiello Rigatoni,2.79,pasta,Voiello,true
