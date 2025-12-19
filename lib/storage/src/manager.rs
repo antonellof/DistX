@@ -1,4 +1,4 @@
-use distx_core::{Collection, CollectionConfig, Distance, Error, Result, Point, PointId, Vector};
+use distx_core::{Collection, CollectionConfig, Distance, Error, Result, Point, PointId, Vector, MultiVector};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -6,20 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use crate::lmdb_storage::LmdbStorage;
 use crate::wal::WriteAheadLog;
-use crate::snapshot::SnapshotManager;
+use crate::snapshot::{SnapshotManager, SnapshotDescription, CollectionSnapshotData, CollectionConfigData, PointData};
 use crate::persistence::ForkBasedPersistence;
 
 /// Manages collections and persistence
 pub struct StorageManager {
     collections: Arc<RwLock<HashMap<String, Arc<Collection>>>>,
-    #[allow(dead_code)]
     data_dir: PathBuf,
     #[allow(dead_code)]
     lmdb: Option<Arc<LmdbStorage>>,
     #[allow(dead_code)]
     wal: Option<Arc<WriteAheadLog>>,
-    #[allow(dead_code)]
-    snapshots: Option<Arc<SnapshotManager>>,
+    snapshots: Arc<SnapshotManager>,
     persistence: Arc<ForkBasedPersistence>,
     #[allow(dead_code)]
     save_interval: Option<Duration>,
@@ -90,7 +88,7 @@ impl StorageManager {
             data_dir,
             lmdb: Some(lmdb),
             wal: Some(wal),
-            snapshots: Some(snapshots),
+            snapshots,
             persistence,
             save_interval: Some(Duration::from_secs(300)),
         };
@@ -183,6 +181,155 @@ impl StorageManager {
     /// Check if background save is in progress
     pub fn is_bgsave_in_progress(&self) -> bool {
         ForkBasedPersistence::is_bgsave_in_progress()
+    }
+
+    // ==================== Snapshot Methods ====================
+
+    /// Create a snapshot for a collection
+    pub fn create_collection_snapshot(&self, collection_name: &str) -> Result<SnapshotDescription> {
+        let collections = self.collections.read();
+        let collection = collections.get(collection_name)
+            .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
+
+        // Build snapshot data from collection
+        let points = collection.get_all_points();
+
+        let snapshot_data = CollectionSnapshotData {
+            name: collection_name.to_string(),
+            config: CollectionConfigData {
+                vector_dim: collection.vector_dim(),
+                distance: match collection.distance() {
+                    Distance::Cosine => "Cosine".to_string(),
+                    Distance::Euclidean => "Euclidean".to_string(),
+                    Distance::Dot => "Dot".to_string(),
+                },
+                use_hnsw: collection.use_hnsw(),
+                enable_bm25: collection.enable_bm25(),
+            },
+            points: points.iter().map(|p| PointData {
+                id: match &p.id {
+                    PointId::Integer(i) => i.to_string(),
+                    PointId::String(s) => s.clone(),
+                    PointId::Uuid(u) => u.to_string(),
+                },
+                vector: p.vector.as_slice().to_vec(),
+                multivector: p.multivector.as_ref().map(|mv: &MultiVector| mv.vectors().to_vec()),
+                payload: p.payload.clone(),
+            }).collect(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+
+        self.snapshots.create_collection_snapshot(snapshot_data)
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// List snapshots for a collection
+    pub fn list_collection_snapshots(&self, collection_name: &str) -> Result<Vec<SnapshotDescription>> {
+        self.snapshots.list_collection_snapshots(collection_name)
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Delete a snapshot
+    pub fn delete_collection_snapshot(&self, collection_name: &str, snapshot_name: &str) -> Result<bool> {
+        self.snapshots.delete_collection_snapshot(collection_name, snapshot_name)
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Get snapshot file path for download
+    pub fn get_snapshot_path(&self, collection_name: &str, snapshot_name: &str) -> Option<PathBuf> {
+        self.snapshots.get_snapshot_path(collection_name, snapshot_name)
+    }
+
+    /// Recover collection from a snapshot file
+    pub fn recover_from_snapshot(&self, collection_name: &str, snapshot_name: &str) -> Result<Arc<Collection>> {
+        let snapshot_data = self.snapshots.load_collection_snapshot(collection_name, snapshot_name)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        self.restore_collection_from_data(snapshot_data)
+    }
+
+    /// Recover collection from a URL
+    pub async fn recover_from_url(&self, collection_name: &str, url: &str, checksum: Option<&str>) -> Result<Arc<Collection>> {
+        // Download snapshot
+        let snapshot_path = self.snapshots.download_snapshot_from_url(collection_name, url, checksum)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        // Load and restore
+        let snapshot_data = self.snapshots.load_snapshot_from_path(&snapshot_path)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        self.restore_collection_from_data(snapshot_data)
+    }
+
+    /// Restore a collection from snapshot data
+    fn restore_collection_from_data(&self, data: CollectionSnapshotData) -> Result<Arc<Collection>> {
+        let config = CollectionConfig {
+            name: data.name.clone(),
+            vector_dim: data.config.vector_dim,
+            distance: match data.config.distance.as_str() {
+                "Cosine" => Distance::Cosine,
+                "Euclidean" => Distance::Euclidean,
+                "Dot" => Distance::Dot,
+                _ => Distance::Cosine,
+            },
+            use_hnsw: data.config.use_hnsw,
+            enable_bm25: data.config.enable_bm25,
+        };
+
+        // Remove existing collection if present
+        {
+            let mut collections = self.collections.write();
+            collections.remove(&data.name);
+        }
+
+        // Create new collection
+        let collection = Arc::new(Collection::new(config));
+
+        // Restore points
+        for point_data in data.points {
+            let point_id = point_data.id.parse::<u64>()
+                .map(PointId::Integer)
+                .unwrap_or_else(|_| PointId::String(point_data.id.clone()));
+
+            let point = if let Some(mv_data) = point_data.multivector {
+                // Create multivector from data
+                match MultiVector::new(mv_data) {
+                    Ok(mv) => Point::new_multi(point_id, mv, point_data.payload),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create multivector: {}", e);
+                        Point::new(point_id, Vector::new(point_data.vector), point_data.payload)
+                    }
+                }
+            } else {
+                Point::new(
+                    point_id,
+                    Vector::new(point_data.vector),
+                    point_data.payload,
+                )
+            };
+
+            if let Err(e) = collection.upsert(point) {
+                eprintln!("Warning: Failed to restore point: {}", e);
+            }
+        }
+
+        // Add to collections
+        {
+            let mut collections = self.collections.write();
+            collections.insert(data.name, collection.clone());
+        }
+
+        Ok(collection)
+    }
+
+    /// List all snapshots
+    pub fn list_all_snapshots(&self) -> Result<Vec<SnapshotDescription>> {
+        self.snapshots.list_all_snapshots()
+            .map_err(|e| Error::Storage(e.to_string()))
     }
 }
 

@@ -91,6 +91,18 @@ impl Collection {
 
     #[inline]
     #[must_use]
+    pub fn use_hnsw(&self) -> bool {
+        self.config.use_hnsw
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn enable_bm25(&self) -> bool {
+        self.config.enable_bm25
+    }
+
+    #[inline]
+    #[must_use]
     pub fn count(&self) -> usize {
         self.points.read().len()
     }

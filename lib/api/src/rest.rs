@@ -1187,33 +1187,78 @@ async fn telemetry_info() -> ActixResult<HttpResponse> {
     })))
 }
 
-// Snapshot endpoints (stubs - feature not fully implemented)
+// Snapshot endpoints
 
 async fn list_snapshots(
-    path: web::Path<String>,
-) -> ActixResult<HttpResponse> {
-    let _collection_name = path.into_inner();
-    // Return empty list - snapshots not implemented yet
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": []
-    })))
-}
-
-async fn list_all_snapshots() -> ActixResult<HttpResponse> {
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": []
-    })))
-}
-
-async fn create_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
     let collection_name = path.into_inner();
-    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
-        "status": {
-            "error": format!("Snapshot creation not yet implemented for collection '{}'", collection_name)
+    
+    match storage.list_collection_snapshots(&collection_name) {
+        Ok(snapshots) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "result": snapshots
+            })))
         }
-    })))
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": {
+                    "error": e.to_string()
+                }
+            })))
+        }
+    }
+}
+
+async fn list_all_snapshots(
+    storage: web::Data<Arc<StorageManager>>,
+) -> ActixResult<HttpResponse> {
+    match storage.list_all_snapshots() {
+        Ok(snapshots) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "result": snapshots
+            })))
+        }
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": {
+                    "error": e.to_string()
+                }
+            })))
+        }
+    }
+}
+
+async fn create_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    
+    // Check if collection exists
+    if !storage.collection_exists(&collection_name) {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": {
+                "error": format!("Collection '{}' not found", collection_name)
+            }
+        })));
+    }
+    
+    match storage.create_collection_snapshot(&collection_name) {
+        Ok(snapshot) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "result": snapshot
+            })))
+        }
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": {
+                    "error": e.to_string()
+                }
+            })))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1221,44 +1266,139 @@ struct RecoverSnapshotRequest {
     location: String,
     #[serde(default)]
     priority: Option<String>,
+    #[serde(default)]
+    checksum: Option<String>,
 }
 
 async fn recover_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
     req: web::Json<RecoverSnapshotRequest>,
 ) -> ActixResult<HttpResponse> {
     let collection_name = path.into_inner();
-    Ok(HttpResponse::NotImplemented().json(serde_json::json!({
-        "status": {
-            "error": format!(
-                "Remote snapshot recovery not yet implemented. Cannot recover '{}' for collection '{}'. Please use the REST API to create collections and upload points directly.",
-                req.location,
-                collection_name
-            )
+    let location = &req.location;
+    
+    // Check if it's a URL or local file reference
+    if location.starts_with("http://") || location.starts_with("https://") {
+        // Remote URL recovery
+        match storage.recover_from_url(
+            &collection_name,
+            location,
+            req.checksum.as_deref(),
+        ).await {
+            Ok(_collection) => {
+                Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "result": true
+                })))
+            }
+            Err(e) => {
+                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": {
+                        "error": format!("Failed to recover from URL: {}", e)
+                    }
+                })))
+            }
         }
-    })))
+    } else if location.starts_with("file://") {
+        // Local file recovery - extract snapshot name from path
+        let snapshot_name = location
+            .trim_start_matches("file://")
+            .rsplit('/')
+            .next()
+            .unwrap_or(location);
+        
+        match storage.recover_from_snapshot(&collection_name, snapshot_name) {
+            Ok(_collection) => {
+                Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "result": true
+                })))
+            }
+            Err(e) => {
+                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": {
+                        "error": format!("Failed to recover from snapshot: {}", e)
+                    }
+                })))
+            }
+        }
+    } else {
+        // Assume it's a snapshot name directly
+        match storage.recover_from_snapshot(&collection_name, location) {
+            Ok(_collection) => {
+                Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "result": true
+                })))
+            }
+            Err(e) => {
+                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": {
+                        "error": format!("Failed to recover from snapshot: {}", e)
+                    }
+                })))
+            }
+        }
+    }
 }
 
 async fn get_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
     let (collection_name, snapshot_name) = path.into_inner();
-    Ok(HttpResponse::NotFound().json(serde_json::json!({
-        "status": {
-            "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
+    
+    if let Some(snapshot_path) = storage.get_snapshot_path(&collection_name, &snapshot_name) {
+        // Return the snapshot file for download
+        match std::fs::read(&snapshot_path) {
+            Ok(data) => {
+                Ok(HttpResponse::Ok()
+                    .content_type("application/octet-stream")
+                    .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", snapshot_name)))
+                    .body(data))
+            }
+            Err(e) => {
+                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                    "status": {
+                        "error": format!("Failed to read snapshot file: {}", e)
+                    }
+                })))
+            }
         }
-    })))
+    } else {
+        Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": {
+                "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
+            }
+        })))
+    }
 }
 
 async fn delete_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
     let (collection_name, snapshot_name) = path.into_inner();
-    Ok(HttpResponse::NotFound().json(serde_json::json!({
-        "status": {
-            "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
+    
+    match storage.delete_collection_snapshot(&collection_name, &snapshot_name) {
+        Ok(true) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "result": true
+            })))
         }
-    })))
+        Ok(false) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": {
+                    "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
+                }
+            })))
+        }
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": {
+                    "error": e.to_string()
+                }
+            })))
+        }
+    }
 }
 
 // ============ Additional Qdrant-compatible endpoints ============
