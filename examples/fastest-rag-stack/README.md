@@ -11,19 +11,31 @@ We use:
 
 **Setup OpenAI**:
 
-1. **Get an API key** from [OpenAI](https://platform.openai.com/)
-2. **Set environment variable**:
+1. **Get an API key** from [OpenAI](https://platform.openai.com/api-keys)
+
+2. **Set your API key** (choose one method):
+
+   **Option A: Use .env file (recommended)**
    ```bash
-   export OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>
+   # Copy the example file
+   cp .env.example .env
+   
+   # Edit .env and add your key
+   # OPENAI_API_KEY=sk-your-key-here
    ```
 
-   The app uses OpenAI with `gpt-5-mini` by default. No other configuration needed!
-
-   **Available models**: `gpt-5-mini`, `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo`, etc.
-
-   **To use a different model**:
+   **Option B: Export in terminal**
    ```bash
-   export LLM_MODEL=gpt-4o  # or any other OpenAI model
+   export OPENAI_API_KEY=sk-your-key-here
+   ```
+
+   The app uses OpenAI with `gpt-4o-mini` by default. No other configuration needed!
+
+   **Available models**: `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo`, etc.
+
+   **To use a different model** (in .env or terminal):
+   ```bash
+   OPENAI_CHAT_MODEL=gpt-4o
    ```
 
 **Setup DistX VectorDB**

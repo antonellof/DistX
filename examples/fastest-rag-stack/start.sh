@@ -10,6 +10,7 @@ DISTX_DATA_DIR="$SCRIPT_DIR/.distx_data"
 DISTX_DOCKER_CONTAINER="distx"
 DISTX_STARTED_BY_US=""
 DISTX_MODE=""  # "docker" or "local"
+ENV_FILE="$SCRIPT_DIR/.env"
 
 # Colors for output
 RED='\033[0;31m'
@@ -17,6 +18,45 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Load .env file if it exists
+load_env() {
+    if [ -f "$ENV_FILE" ]; then
+        echo -e "${BLUE}📄 Loading environment from .env file...${NC}"
+        # Export all variables from .env (ignore comments and empty lines)
+        set -a
+        source "$ENV_FILE"
+        set +a
+        return 0
+    fi
+    return 1
+}
+
+# Check if .env.example should be copied
+setup_env() {
+    if [ ! -f "$ENV_FILE" ]; then
+        if [ -f "$SCRIPT_DIR/.env.example" ]; then
+            echo -e "${YELLOW}⚠️  No .env file found.${NC}"
+            echo ""
+            echo "Would you like to create one from .env.example?"
+            read -p "Create .env file? [Y/n]: " create_env
+            create_env=${create_env:-Y}
+            
+            if [[ "$create_env" =~ ^[Yy] ]]; then
+                cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
+                echo -e "${GREEN}✅ Created .env file from .env.example${NC}"
+                echo ""
+                echo -e "${YELLOW}Please edit .env and add your OpenAI API key:${NC}"
+                echo "   $ENV_FILE"
+                echo ""
+                read -p "Press Enter after editing .env, or Ctrl+C to exit..."
+                
+                # Reload after editing
+                load_env
+            fi
+        fi
+    fi
+}
 
 # Detect platform and set download URL
 detect_platform() {
@@ -224,6 +264,9 @@ echo -e "${GREEN}║           🚀 Starting RAG Stack with DistX 🚀          
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
+# Load environment variables from .env
+load_env || setup_env
+
 # Check if DistX is already running
 if is_distx_responding; then
     # Check if it's running via Docker
@@ -320,10 +363,20 @@ echo ""
 if [ -z "$OPENAI_API_KEY" ]; then
     echo -e "${YELLOW}⚠️  OPENAI_API_KEY is not set!${NC}"
     echo ""
-    echo "Please set it:"
-    echo "  export OPENAI_API_KEY=your-key-here"
+    echo "You can set it in one of these ways:"
+    echo ""
+    echo "  1. Create a .env file (recommended):"
+    echo "     cp .env.example .env"
+    echo "     # Then edit .env and add your key"
+    echo ""
+    echo "  2. Export in terminal:"
+    echo "     export OPENAI_API_KEY=sk-your-key-here"
+    echo ""
+    echo "  Get your API key at: https://platform.openai.com/api-keys"
     echo ""
     read -p "Press Enter to continue anyway, or Ctrl+C to exit..."
+else
+    echo -e "${GREEN}✅ OpenAI API key loaded${NC}"
 fi
 
 # Start Streamlit
