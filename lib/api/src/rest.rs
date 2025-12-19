@@ -235,6 +235,7 @@ impl RestApi {
                 .route("/collections/{name}/points/scroll", web::post().to(scroll_points))
                 .route("/collections/{name}/points/delete", web::post().to(delete_points_by_filter))
                 .route("/collections/{name}/points/search", web::post().to(search_points))
+                .route("/collections/{name}/points/query", web::post().to(query_points))
                 .route("/collections/{name}/points/{id}", web::get().to(get_point))
                 .route("/collections/{name}/points/{id}", web::delete().to(delete_point))
                 .route("/collections/{name}/exists", web::get().to(collection_exists))
@@ -608,6 +609,167 @@ async fn search_points(
     Ok(HttpResponse::BadRequest().json(serde_json::json!({
         "status": {
             "error": "Either 'vector' or 'text' must be provided"
+        }
+    })))
+}
+
+/// Query request for Qdrant's universal query API
+/// Supports both single vectors and multivectors (ColBERT-style MaxSim)
+#[derive(Deserialize)]
+struct QueryRequest {
+    /// Query vector - can be single [f32] or multi [[f32]]
+    query: serde_json::Value,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+/// Query points using Qdrant's universal query API
+/// Supports multivector queries with MaxSim scoring
+async fn query_points(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<QueryRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": {
+                    "error": "Collection not found"
+                }
+            })));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(10);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    
+    // Parse filter if provided
+    let filter: Option<Box<dyn Filter>> = req.filter.as_ref().and_then(|f| {
+        parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
+    });
+    
+    // Determine if query is multivector or single vector
+    let results = match &req.query {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr.first() {
+                // Multivector: [[0.1, 0.2], [0.3, 0.4]]
+                Some(serde_json::Value::Array(_)) => {
+                    // Parse multivector
+                    let multivec_data: Result<Vec<Vec<f32>>, _> = arr.iter()
+                        .map(|sub| {
+                            if let serde_json::Value::Array(sub_arr) = sub {
+                                sub_arr.iter()
+                                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                                    .collect::<Result<Vec<f32>, _>>()
+                            } else {
+                                Err("expected array")
+                            }
+                        })
+                        .collect();
+                    
+                    match multivec_data {
+                        Ok(data) => {
+                            match MultiVector::new(data) {
+                                Ok(query_mv) => {
+                                    // Use MaxSim search
+                                    if let Some(f) = filter.as_deref() {
+                                        collection.search_multivector(&query_mv, limit, Some(f))
+                                    } else {
+                                        collection.search_multivector(&query_mv, limit, None)
+                                    }
+                                }
+                                Err(e) => {
+                                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                                        "status": { "error": format!("Invalid multivector: {}", e) }
+                                    })));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                                "status": { "error": format!("Invalid multivector format: {}", e) }
+                            })));
+                        }
+                    }
+                }
+                // Single vector: [0.1, 0.2, 0.3]
+                Some(serde_json::Value::Number(_)) => {
+                    let vector_data: Result<Vec<f32>, _> = arr.iter()
+                        .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                        .collect();
+                    
+                    match vector_data {
+                        Ok(data) => {
+                            let query_vector = Vector::new(data);
+                            if let Some(f) = filter.as_deref() {
+                                collection.search(&query_vector, limit, Some(f))
+                            } else {
+                                collection.search(&query_vector, limit, None)
+                            }
+                        }
+                        Err(e) => {
+                            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                                "status": { "error": format!("Invalid vector: {}", e) }
+                            })));
+                        }
+                    }
+                }
+                _ => {
+                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                        "status": { "error": "Invalid query format" }
+                    })));
+                }
+            }
+        }
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                "status": { "error": "Query must be a vector array" }
+            })));
+        }
+    };
+    
+    // Format results
+    let search_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(point, score)| {
+            let mut result = serde_json::json!({
+                "id": match &point.id {
+                    distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+                    distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
+                    distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+                },
+                "version": 0,
+                "score": score,
+            });
+            
+            if with_payload {
+                result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+            }
+            
+            if with_vector {
+                result["vector"] = serde_json::json!(point.vector.as_slice());
+                if let Some(mv) = &point.multivector {
+                    result["multivector"] = serde_json::json!(mv.vectors());
+                }
+            }
+            
+            result
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "points": search_results
         }
     })))
 }
