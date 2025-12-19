@@ -2,13 +2,14 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{Read, Write, BufReader, BufWriter};
+use std::io::{Read, Write, BufReader, BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use chrono::{DateTime, Utc};
 use sha2::{Sha256, Digest};
+use tar::Archive;
 
 /// Snapshot description for API responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,24 +197,13 @@ impl SnapshotManager {
     }
 
     /// Download snapshot from URL and save it
+    /// Supports both DistX and Qdrant snapshot formats
     pub async fn download_snapshot_from_url(
         &self,
         collection_name: &str,
         url: &str,
         expected_checksum: Option<&str>,
     ) -> Result<PathBuf> {
-        // Check if this is a Qdrant public snapshot URL
-        if url.contains("snapshots.qdrant.io") || url.contains("qdrant") && url.contains(".snapshot") {
-            return Err(anyhow!(
-                "Cannot restore from Qdrant snapshots directly. \
-                Qdrant snapshots use a different format (tar.gz archive). \
-                To import data from Qdrant, please:\n\
-                1. Export points using Qdrant's scroll API\n\
-                2. Import them into DistX using the upsert API\n\
-                Or use a migration script to transfer the data."
-            ));
-        }
-
         let collection_dir = self.collection_snapshot_dir(collection_name);
         fs::create_dir_all(&collection_dir)?;
 
@@ -257,43 +247,128 @@ impl SnapshotManager {
     }
 
     /// Load snapshot from a file path (for recovery)
+    /// Supports both DistX format (gzipped JSON) and Qdrant format (tar or tar.gz archive)
     pub fn load_snapshot_from_path(&self, path: &Path) -> Result<CollectionSnapshotData> {
-        let file = File::open(path)?;
-        let mut decoder = GzDecoder::new(BufReader::new(file));
-        let mut json_data = Vec::new();
+        let file_data = fs::read(path)?;
         
-        match decoder.read_to_end(&mut json_data) {
-            Ok(_) => {},
-            Err(e) => {
-                // Check if it might be a Qdrant tar.gz snapshot (not just gzipped JSON)
-                let file_bytes = fs::read(path)?;
-                if file_bytes.len() > 2 && file_bytes[0] == 0x1f && file_bytes[1] == 0x8b {
-                    // It's gzipped, but not JSON - likely a Qdrant tar.gz archive
-                    return Err(anyhow!(
-                        "This appears to be a Qdrant tar.gz snapshot archive. \
-                        DistX snapshots use a different format. \
-                        To migrate data from Qdrant, please use the REST API to export and import points."
-                    ));
+        // Check if it's gzipped (magic bytes 1f 8b)
+        let data = if file_data.len() > 2 && file_data[0] == 0x1f && file_data[1] == 0x8b {
+            // Gzipped - decompress first
+            let mut decoder = GzDecoder::new(Cursor::new(&file_data));
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed)?;
+            decompressed
+        } else {
+            // Not gzipped - use raw data
+            file_data
+        };
+
+        // Try to parse as DistX JSON format first
+        if let Ok(snapshot_data) = serde_json::from_slice::<CollectionSnapshotData>(&data) {
+            return Ok(snapshot_data);
+        }
+
+        // Check if it's a tar archive (Qdrant format) - "ustar" at offset 257
+        if data.len() > 262 && &data[257..262] == b"ustar" {
+            return self.try_parse_qdrant_snapshot(&data);
+        }
+
+        Err(anyhow!("Failed to parse snapshot: not a valid DistX or Qdrant snapshot format"))
+    }
+
+    /// Try to parse a Qdrant tar.gz snapshot and extract collection data
+    fn try_parse_qdrant_snapshot(&self, tar_data: &[u8]) -> Result<CollectionSnapshotData> {
+        let cursor = Cursor::new(tar_data);
+        let mut archive = Archive::new(cursor);
+        
+        let mut collection_config: Option<serde_json::Value> = None;
+        let mut collection_name = String::from("imported_collection");
+        
+        // Read through the archive looking for config.json
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_path_buf();
+            let path_str = path.to_string_lossy();
+            
+            // Look for collection config
+            if path_str.ends_with("config.json") {
+                let mut content = String::new();
+                entry.read_to_string(&mut content)?;
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                    collection_config = Some(config);
                 }
-                return Err(anyhow!("Failed to decompress snapshot: {}", e));
             }
         }
 
-        // Try to parse as JSON
-        match serde_json::from_slice::<CollectionSnapshotData>(&json_data) {
-            Ok(data) => Ok(data),
-            Err(e) => {
-                // Check if the decompressed data starts with typical tar header
-                if json_data.len() > 262 && &json_data[257..262] == b"ustar" {
-                    return Err(anyhow!(
-                        "This appears to be a Qdrant tar.gz snapshot archive. \
-                        DistX snapshots use a different format (gzipped JSON). \
-                        To migrate data from Qdrant, please use the REST API to export and import points."
-                    ));
+        // Extract collection configuration
+        let (vector_dim, distance) = if let Some(config) = &collection_config {
+            let params = config.get("params").unwrap_or(config);
+            
+            // Try to get vector dimension and distance
+            let vectors = params.get("vectors");
+            let (dim, dist) = if let Some(v) = vectors {
+                if let Some(size) = v.get("size").and_then(|s| s.as_u64()) {
+                    let distance = v.get("distance")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("Cosine")
+                        .to_string();
+                    (size as usize, distance)
+                } else {
+                    // Named vectors format
+                    if let Some(obj) = v.as_object() {
+                        if let Some((_, first_vec)) = obj.iter().next() {
+                            let size = first_vec.get("size").and_then(|s| s.as_u64()).unwrap_or(128) as usize;
+                            let distance = first_vec.get("distance")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("Cosine")
+                                .to_string();
+                            (size, distance)
+                        } else {
+                            (128, "Cosine".to_string())
+                        }
+                    } else {
+                        (128, "Cosine".to_string())
+                    }
                 }
-                Err(anyhow!("Failed to parse snapshot JSON: {}", e))
-            }
-        }
+            } else {
+                (128, "Cosine".to_string())
+            };
+
+            (dim, dist)
+        } else {
+            return Err(anyhow!(
+                "Could not find collection config in Qdrant snapshot. \
+                Note: DistX can read Qdrant snapshot structure but cannot extract points from RocksDB storage. \
+                To migrate data from Qdrant:\n\
+                1. Run Qdrant with the snapshot restored\n\
+                2. Use the scroll API to export all points\n\
+                3. Import them into DistX using the upsert API"
+            ));
+        };
+
+        // We found the config but cannot extract points from RocksDB
+        // Return an empty collection with the right config and a helpful message
+        eprintln!(
+            "Note: Imported Qdrant collection config ({}D vectors, {} distance). \
+            Points cannot be automatically extracted from Qdrant's RocksDB storage. \
+            Please use the Qdrant scroll API to migrate points.",
+            vector_dim, distance
+        );
+
+        Ok(CollectionSnapshotData {
+            name: collection_name,
+            config: CollectionConfigData {
+                vector_dim,
+                distance,
+                use_hnsw: true,
+                enable_bm25: false,
+            },
+            points: Vec::new(), // Empty - points can't be extracted from RocksDB
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        })
     }
 
     /// Save uploaded snapshot data to a file

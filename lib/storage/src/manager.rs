@@ -248,7 +248,7 @@ impl StorageManager {
         let snapshot_data = self.snapshots.load_collection_snapshot(collection_name, snapshot_name)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        self.restore_collection_from_data(snapshot_data)
+        self.restore_collection_from_data_with_name(snapshot_data, Some(collection_name))
     }
 
     /// Recover collection from a URL
@@ -258,11 +258,11 @@ impl StorageManager {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        // Load and restore
+        // Load and restore - use the target collection_name
         let snapshot_data = self.snapshots.load_snapshot_from_path(&snapshot_path)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        self.restore_collection_from_data(snapshot_data)
+        self.restore_collection_from_data_with_name(snapshot_data, Some(collection_name))
     }
 
     /// Restore a collection from snapshot data
