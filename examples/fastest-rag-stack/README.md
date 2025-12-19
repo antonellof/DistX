@@ -31,11 +31,14 @@ We use:
 
    The app uses OpenAI with `gpt-4o-mini` by default. No other configuration needed!
 
-   **Available models**: `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo`, etc.
+   **Available models**:
+   - Latest: `gpt-5`, `gpt-5.1`, `gpt-5.2`, `o3`, `o3-mini`, `o4-mini`
+   - GPT-4 series: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`
+   - Legacy: `gpt-3.5-turbo`
 
    **To use a different model** (in .env or terminal):
    ```bash
-   OPENAI_CHAT_MODEL=gpt-4o
+   OPENAI_CHAT_MODEL=gpt-5
    ```
 
 **Setup DistX VectorDB**
