@@ -56,6 +56,8 @@ pub struct Collection {
     pending_points: Arc<RwLock<Vec<Point>>>,
     /// Payload field indexes
     payload_indexes: Arc<RwLock<HashMap<String, PayloadIndexType>>>,
+    /// Operation counter for tracking write operations
+    operation_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Collection {
@@ -82,7 +84,14 @@ impl Collection {
             batch_mode: Arc::new(RwLock::new(false)),
             pending_points: Arc::new(RwLock::new(Vec::new())),
             payload_indexes: Arc::new(RwLock::new(HashMap::new())),
+            operation_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+    
+    /// Get next operation ID (atomically increments counter)
+    #[inline]
+    pub fn next_operation_id(&self) -> u64 {
+        self.operation_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     #[inline]

@@ -676,8 +676,9 @@ async fn upsert_points(
         }
     }
 
+    let operation_id = collection.next_operation_id();
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": operation_id,
         "status": "acknowledged"
     }), start_time))
 }
@@ -1439,10 +1440,13 @@ async fn delete_point(
     };
 
     match collection.delete(&point_id) {
-        Ok(true) => Ok(qdrant_response(serde_json::json!({
-            "operation_id": 0,
-            "status": "acknowledged"
-        }), start_time)),
+        Ok(true) => {
+            let operation_id = collection.next_operation_id();
+            Ok(qdrant_response(serde_json::json!({
+                "operation_id": operation_id,
+                "status": "acknowledged"
+            }), start_time))
+        }
         Ok(false) => Ok(qdrant_not_found("Point not found", start_time)),
         Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
@@ -1539,8 +1543,9 @@ async fn delete_points_by_filter(
         }
     }
     
+    let operation_id = collection.next_operation_id();
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": operation_id,
         "status": "acknowledged"
     }), start_time))
 }
@@ -3040,10 +3045,13 @@ async fn create_field_index(
     };
 
     match collection.create_payload_index(&req.field_name, index_type) {
-        Ok(_) => Ok(qdrant_response(serde_json::json!({
-            "operation_id": 0,
-            "status": "acknowledged"
-        }), start_time)),
+        Ok(_) => {
+            let operation_id = collection.next_operation_id();
+            Ok(qdrant_response(serde_json::json!({
+                "operation_id": operation_id,
+                "status": "acknowledged"
+            }), start_time))
+        }
         Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
@@ -3062,10 +3070,13 @@ async fn delete_field_index(
     };
 
     match collection.delete_payload_index(&field_name) {
-        Ok(_) => Ok(qdrant_response(serde_json::json!({
-            "operation_id": 0,
-            "status": "acknowledged"
-        }), start_time)),
+        Ok(_) => {
+            let operation_id = collection.next_operation_id();
+            Ok(qdrant_response(serde_json::json!({
+                "operation_id": operation_id,
+                "status": "acknowledged"
+            }), start_time))
+        }
         Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
