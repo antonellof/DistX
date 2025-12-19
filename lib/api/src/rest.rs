@@ -8,7 +8,40 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::path::Path;
 use std::collections::HashMap;
+use std::time::Instant;
 use futures_util::StreamExt;
+
+/// Create Qdrant-compatible JSON response with status and time
+fn qdrant_response<T: Serialize>(result: T, start_time: Instant) -> HttpResponse {
+    let elapsed = start_time.elapsed().as_secs_f64();
+    HttpResponse::Ok().json(serde_json::json!({
+        "result": result,
+        "status": "ok",
+        "time": elapsed
+    }))
+}
+
+/// Create Qdrant-compatible error response
+fn qdrant_error(error: &str, start_time: Instant) -> HttpResponse {
+    let elapsed = start_time.elapsed().as_secs_f64();
+    HttpResponse::BadRequest().json(serde_json::json!({
+        "status": {
+            "error": error
+        },
+        "time": elapsed
+    }))
+}
+
+/// Create Qdrant-compatible not found response
+fn qdrant_not_found(error: &str, start_time: Instant) -> HttpResponse {
+    let elapsed = start_time.elapsed().as_secs_f64();
+    HttpResponse::NotFound().json(serde_json::json!({
+        "status": {
+            "error": error
+        },
+        "time": elapsed
+    }))
+}
 
 // Dashboard configuration
 const STATIC_DIR: &str = "./static";
@@ -300,14 +333,15 @@ impl RestApi {
 
 async fn root_info() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
-        "title": "DistX - Fast Vector Database",
-        "version": "0.2.1"
+        "title": "distx - vector search engine",
+        "version": "0.2.1",
+        "commit": ""
     })))
 }
 
 async fn health_check() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
-        "title": "DistX",
+        "title": "distx",
         "version": "0.2.1"
     })))
 }
@@ -315,38 +349,24 @@ async fn health_check() -> ActixResult<HttpResponse> {
 async fn list_collections(
     storage: web::Data<Arc<StorageManager>>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_names = storage.list_collections();
     
-    // Format to match Qdrant's response structure
-    let collections: Vec<serde_json::Value> = collection_names.into_iter().map(|name| {
-        if let Some(collection) = storage.get_collection(&name) {
-            serde_json::json!({
-                "name": name,
-                "config": {
-                    "vectors": {
-                        "size": collection.vector_dim(),
-                        "distance": format!("{:?}", collection.distance())
-                    }
-                }
-            })
-        } else {
-            serde_json::json!({
-                "name": name
-            })
-        }
-    }).collect();
+    // Format to match Qdrant's response structure (only name, no config)
+    let collections: Vec<serde_json::Value> = collection_names.into_iter()
+        .map(|name| serde_json::json!({ "name": name }))
+        .collect();
     
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "collections": collections
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "collections": collections
+    }), start_time))
 }
 
 async fn get_collection(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if let Some(collection) = storage.get_collection(&name) {
@@ -355,51 +375,52 @@ async fn get_collection(
         let points_count = collection.count();
         
         // Format to match Qdrant's full response structure
-        Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": {
-                "status": "green",
-                "optimizer_status": "ok",
-                "vectors_count": points_count,
-                "indexed_vectors_count": points_count,
-                "points_count": points_count,
-                "segments_count": 1,
-                "config": {
-                    "params": {
-                        "vectors": {
-                            "size": vector_dim,
-                            "distance": distance_str
-                        },
-                        "shard_number": 1,
-                        "replication_factor": 1
+        Ok(qdrant_response(serde_json::json!({
+            "status": "green",
+            "optimizer_status": "ok",
+            "vectors_count": points_count,
+            "indexed_vectors_count": points_count,
+            "points_count": points_count,
+            "segments_count": 1,
+            "config": {
+                "params": {
+                    "vectors": {
+                        "size": vector_dim,
+                        "distance": distance_str
                     },
-                    "hnsw_config": {
-                        "m": 16,
-                        "ef_construct": 100,
-                        "full_scan_threshold": 10000
-                    },
-                    "optimizer_config": {
-                        "deleted_threshold": 0.2,
-                        "vacuum_min_vector_number": 1000,
-                        "default_segment_number": 0,
-                        "indexing_threshold": 20000,
-                        "flush_interval_sec": 5,
-                        "max_segment_size_mb": null,
-                        "memmap_threshold_mb": null
-                    },
-                    "wal_config": {
-                        "wal_capacity_mb": 32,
-                        "wal_segments_ahead": 0
-                    }
+                    "shard_number": 1,
+                    "replication_factor": 1,
+                    "write_consistency_factor": 1,
+                    "on_disk_payload": true
                 },
-                "payload_schema": {}
-            }
-        })))
+                "hnsw_config": {
+                    "m": 16,
+                    "ef_construct": 100,
+                    "full_scan_threshold": 10000,
+                    "max_indexing_threads": 0,
+                    "on_disk": false
+                },
+                "optimizer_config": {
+                    "deleted_threshold": 0.2,
+                    "vacuum_min_vector_number": 1000,
+                    "default_segment_number": 0,
+                    "indexing_threshold": 10000,
+                    "flush_interval_sec": 5,
+                    "max_segment_size": null,
+                    "memmap_threshold": null,
+                    "max_optimization_threads": null
+                },
+                "wal_config": {
+                    "wal_capacity_mb": 32,
+                    "wal_segments_ahead": 0,
+                    "wal_retain_closed": 1
+                },
+                "quantization_config": null
+            },
+            "payload_schema": {}
+        }), start_time))
     } else {
-        Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": "Collection not found"
-            }
-        })))
+        Ok(qdrant_not_found("Collection not found", start_time))
     }
 }
 
@@ -408,6 +429,7 @@ async fn create_collection(
     path: web::Path<String>,
     req: web::Json<CreateCollectionRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     // Handle sparse-only collections (Qdrant compatibility)
@@ -422,14 +444,9 @@ async fn create_collection(
         (vectors.size, dist)
     } else if req.sparse_vectors.is_some() {
         // Sparse-only collection - use BM25 with default text dimension
-        // Note: DistX uses BM25 for sparse text search, not sparse vectors
         (0, Distance::Cosine)
     } else {
-        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "status": {
-                "error": "Either 'vectors' or 'sparse_vectors' must be provided"
-            }
-        })));
+        return Ok(qdrant_error("Either 'vectors' or 'sparse_vectors' must be provided", start_time));
     };
 
     let config = CollectionConfig {
@@ -442,14 +459,8 @@ async fn create_collection(
     };
 
     match storage.create_collection(config) {
-        Ok(_) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": true
-        }))),
-        Err(e) => Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "status": {
-                "error": e.to_string()
-            }
-        }))),
+        Ok(_) => Ok(qdrant_response(true, start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -457,22 +468,13 @@ async fn delete_collection(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     match storage.delete_collection(&name) {
-        Ok(true) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": true
-        }))),
-        Ok(false) => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": "Collection not found"
-            }
-        }))),
-        Err(e) => Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "status": {
-                "error": e.to_string()
-            }
-        }))),
+        Ok(true) => Ok(qdrant_response(true, start_time)),
+        Ok(false) => Ok(qdrant_not_found("Collection not found", start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -481,16 +483,13 @@ async fn upsert_points(
     path: web::Path<String>,
     req: web::Json<UpsertPointsRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -540,37 +539,23 @@ async fn upsert_points(
                 };
                 
                 if let Err(e) = result {
-                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                        "status": {
-                            "error": e.to_string()
-                        }
-                    })));
+                    return Ok(qdrant_error(&e.to_string(), start_time));
                 }
             } else if let Some(point) = points_vec.first() {
                 if let Err(e) = collection.upsert(point.clone()) {
-                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                        "status": {
-                            "error": e.to_string()
-                        }
-                    })));
+                    return Ok(qdrant_error(&e.to_string(), start_time));
                 }
             }
         }
         Err(e) => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "status": {
-                    "error": e
-                }
-            })));
+            return Ok(qdrant_error(e, start_time));
         }
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 async fn search_points(
@@ -578,16 +563,13 @@ async fn search_points(
     path: web::Path<String>,
     req: web::Json<SearchRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -613,9 +595,7 @@ async fn search_points(
             })
             .collect();
 
-        return Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": search_results
-        })));
+        return Ok(qdrant_response(search_results, start_time));
     }
 
     if let Some(vector_data) = &req.vector {
@@ -647,16 +627,10 @@ async fn search_points(
             })
             .collect();
 
-        return Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": search_results
-        })));
+        return Ok(qdrant_response(search_results, start_time));
     }
 
-    Ok(HttpResponse::BadRequest().json(serde_json::json!({
-        "status": {
-            "error": "Either 'vector' or 'text' must be provided"
-        }
-    })))
+    Ok(qdrant_error("Either 'vector' or 'text' must be provided", start_time))
 }
 
 /// Query request for Qdrant's universal query API
@@ -682,16 +656,13 @@ async fn query_points(
     path: web::Path<String>,
     req: web::Json<QueryRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -713,9 +684,7 @@ async fn query_points(
             } else if let Some(id) = n.as_i64() {
                 id.to_string()
             } else {
-                return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                    "status": { "error": "Invalid point ID format" }
-                })));
+                return Ok(qdrant_error("Invalid point ID format", start_time));
             };
             
             // Get the point by ID and use its vector for search
@@ -731,9 +700,7 @@ async fn query_points(
                 search_results.truncate(limit);
                 search_results
             } else {
-                return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                    "status": { "error": format!("Point with ID '{}' not found", point_id_str) }
-                })));
+                return Ok(qdrant_not_found(&format!("Point with ID '{}' not found", point_id_str), start_time));
             }
         }
         // Query by string point ID
@@ -750,9 +717,7 @@ async fn query_points(
                 search_results.truncate(limit);
                 search_results
             } else {
-                return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                    "status": { "error": format!("Point with ID '{}' not found", s) }
-                })));
+                return Ok(qdrant_not_found(&format!("Point with ID '{}' not found", s), start_time));
             }
         }
         serde_json::Value::Array(arr) if !arr.is_empty() => {
@@ -784,16 +749,12 @@ async fn query_points(
                                     }
                                 }
                                 Err(e) => {
-                                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                                        "status": { "error": format!("Invalid multivector: {}", e) }
-                                    })));
+                                    return Ok(qdrant_error(&format!("Invalid multivector: {}", e), start_time));
                                 }
                             }
                         }
                         Err(e) => {
-                            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                                "status": { "error": format!("Invalid multivector format: {}", e) }
-                            })));
+                            return Ok(qdrant_error(&format!("Invalid multivector format: {}", e), start_time));
                         }
                     }
                 }
@@ -813,23 +774,17 @@ async fn query_points(
                             }
                         }
                         Err(e) => {
-                            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                                "status": { "error": format!("Invalid vector: {}", e) }
-                            })));
+                            return Ok(qdrant_error(&format!("Invalid vector: {}", e), start_time));
                         }
                     }
                 }
                 _ => {
-                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                        "status": { "error": "Invalid query format" }
-                    })));
+                    return Ok(qdrant_error("Invalid query format", start_time));
                 }
             }
         }
         _ => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "status": { "error": "Query must be a vector array or point ID" }
-            })));
+            return Ok(qdrant_error("Query must be a vector array or point ID", start_time));
         }
     };
     
@@ -862,11 +817,9 @@ async fn query_points(
         })
         .collect();
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "points": search_results
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "points": search_results
+    }), start_time))
 }
 
 fn parse_filter(filter_json: &serde_json::Value) -> Option<FilterCondition> {
@@ -903,16 +856,13 @@ async fn scroll_points(
     path: web::Path<String>,
     req: web::Json<ScrollRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
     
     let collection = match storage.get_collection(&collection_name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
     
@@ -984,28 +934,23 @@ async fn scroll_points(
         obj
     }).collect();
     
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "points": results,
-            "next_page_offset": next_offset
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "points": results,
+        "next_page_offset": next_offset
+    }), start_time))
 }
 
 async fn get_point(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let (collection_name, point_id) = path.into_inner();
     
     let collection = match storage.get_collection(&collection_name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -1027,13 +972,9 @@ async fn get_point(
                 result["multivector"] = serde_json::json!(mv.vectors());
             }
             
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "result": result })))
+            Ok(qdrant_response(result, start_time))
         }
-        None => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": "Point not found"
-            }
-        }))),
+        None => Ok(qdrant_not_found("Point not found", start_time)),
     }
 }
 
@@ -1041,36 +982,23 @@ async fn delete_point(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let (collection_name, point_id) = path.into_inner();
     
     let collection = match storage.get_collection(&collection_name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
     match collection.delete(&point_id) {
-        Ok(true) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": {
-                "operation_id": 0,
-                "status": "completed"
-            }
-        }))),
-        Ok(false) => Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": "Point not found"
-            }
-        }))),
-        Err(e) => Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "status": {
-                "error": e.to_string()
-            }
-        }))),
+        Ok(true) => Ok(qdrant_response(serde_json::json!({
+            "operation_id": 0,
+            "status": "acknowledged"
+        }), start_time)),
+        Ok(false) => Ok(qdrant_not_found("Point not found", start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -1104,14 +1032,11 @@ async fn delete_points_by_filter(
 ) -> ActixResult<HttpResponse> {
     let collection_name = path.into_inner();
     
+    let start_time = Instant::now();
     let collection = match storage.get_collection(&collection_name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": "Collection not found"
-                }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
     
@@ -1168,75 +1093,52 @@ async fn delete_points_by_filter(
         }
     }
     
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 async fn collection_exists(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     let exists = storage.collection_exists(&name);
     
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "exists": exists
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "exists": exists
+    }), start_time))
 }
 
 // Qdrant compatibility endpoints
 
 async fn list_aliases() -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     // DistX doesn't support aliases yet, return empty list
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "aliases": []
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "aliases": []
+    }), start_time))
 }
 
 async fn cluster_info() -> ActixResult<HttpResponse> {
-    // DistX runs as single node, return minimal cluster info
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "status": "enabled",
-            "peer_id": 1,
-            "peers": {
-                "1": {
-                    "uri": "http://localhost:6335"
-                }
-            },
-            "raft_info": {
-                "term": 0,
-                "commit": 0,
-                "pending_operations": 0,
-                "leader": 1,
-                "role": "Leader"
-            },
-            "consensus_thread_status": {
-                "consensus_thread_status": "working"
-            },
-            "message_send_failures": {}
-        }
-    })))
+    let start_time = Instant::now();
+    // DistX runs as single node - return disabled status like Qdrant single-node
+    Ok(qdrant_response(serde_json::json!({
+        "status": "disabled"
+    }), start_time))
 }
 
 async fn telemetry_info() -> ActixResult<HttpResponse> {
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "id": "distx-single-node",
-            "app": {
-                "name": "distx",
-                "version": "0.2.1"
-            }
+    let start_time = Instant::now();
+    Ok(qdrant_response(serde_json::json!({
+        "id": "distx-single-node",
+        "app": {
+            "name": "distx",
+            "version": "0.2.1"
         }
-    })))
+    }), start_time))
 }
 
 // Snapshot endpoints
@@ -1245,40 +1147,22 @@ async fn list_snapshots(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
     
     match storage.list_collection_snapshots(&collection_name) {
-        Ok(snapshots) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "result": snapshots
-            })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": {
-                    "error": e.to_string()
-                }
-            })))
-        }
+        Ok(snapshots) => Ok(qdrant_response(snapshots, start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
 async fn list_all_snapshots(
     storage: web::Data<Arc<StorageManager>>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     match storage.list_all_snapshots() {
-        Ok(snapshots) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "result": snapshots
-            })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": {
-                    "error": e.to_string()
-                }
-            })))
-        }
+        Ok(snapshots) => Ok(qdrant_response(snapshots, start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -1286,30 +1170,17 @@ async fn create_snapshot(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
     
     // Check if collection exists
     if !storage.collection_exists(&collection_name) {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": format!("Collection '{}' not found", collection_name)
-            }
-        })));
+        return Ok(qdrant_not_found(&format!("Collection '{}' not found", collection_name), start_time));
     }
     
     match storage.create_collection_snapshot(&collection_name) {
-        Ok(snapshot) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "result": snapshot
-            })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": {
-                    "error": e.to_string()
-                }
-            })))
-        }
+        Ok(snapshot) => Ok(qdrant_response(snapshot, start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -1327,30 +1198,30 @@ async fn recover_snapshot(
     path: web::Path<String>,
     req: web::Json<RecoverSnapshotRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
     let location = &req.location;
     
     // Helper to build response with collection info
-    fn build_recovery_response(collection: &distx_core::Collection) -> HttpResponse {
+    fn build_recovery_result(collection: &distx_core::Collection) -> serde_json::Value {
         let points_count = collection.count();
         let vector_dim = collection.vector_dim();
         
         if points_count == 0 {
-            // Empty collection - might be from Qdrant snapshot
-            HttpResponse::Ok().json(serde_json::json!({
-                "result": true,
+            serde_json::json!({
+                "recovered": true,
                 "collection": collection.name(),
                 "vector_dim": vector_dim,
                 "points_count": 0,
                 "note": "Collection created with config only. If this was a Qdrant snapshot, points must be migrated separately using the scroll API."
-            }))
+            })
         } else {
-            HttpResponse::Ok().json(serde_json::json!({
-                "result": true,
+            serde_json::json!({
+                "recovered": true,
                 "collection": collection.name(),
                 "vector_dim": vector_dim,
                 "points_count": points_count
-            }))
+            })
         }
     }
     
@@ -1362,14 +1233,8 @@ async fn recover_snapshot(
             location,
             req.checksum.as_deref(),
         ).await {
-            Ok(collection) => Ok(build_recovery_response(&collection)),
-            Err(e) => {
-                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": {
-                        "error": format!("Failed to recover from URL: {}", e)
-                    }
-                })))
-            }
+            Ok(collection) => Ok(qdrant_response(build_recovery_result(&collection), start_time)),
+            Err(e) => Ok(qdrant_error(&format!("Failed to recover from URL: {}", e), start_time)),
         }
     } else if location.starts_with("file://") {
         // Local file recovery - extract snapshot name from path
@@ -1380,26 +1245,14 @@ async fn recover_snapshot(
             .unwrap_or(location);
         
         match storage.recover_from_snapshot(&collection_name, snapshot_name) {
-            Ok(collection) => Ok(build_recovery_response(&collection)),
-            Err(e) => {
-                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": {
-                        "error": format!("Failed to recover from snapshot: {}", e)
-                    }
-                })))
-            }
+            Ok(collection) => Ok(qdrant_response(build_recovery_result(&collection), start_time)),
+            Err(e) => Ok(qdrant_error(&format!("Failed to recover from snapshot: {}", e), start_time)),
         }
     } else {
         // Assume it's a snapshot name directly
         match storage.recover_from_snapshot(&collection_name, location) {
-            Ok(collection) => Ok(build_recovery_response(&collection)),
-            Err(e) => {
-                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": {
-                        "error": format!("Failed to recover from snapshot: {}", e)
-                    }
-                })))
-            }
+            Ok(collection) => Ok(qdrant_response(build_recovery_result(&collection), start_time)),
+            Err(e) => Ok(qdrant_error(&format!("Failed to recover from snapshot: {}", e), start_time)),
         }
     }
 }
@@ -1408,6 +1261,7 @@ async fn get_snapshot(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let (collection_name, snapshot_name) = path.into_inner();
     
     if let Some(snapshot_path) = storage.get_snapshot_path(&collection_name, &snapshot_name) {
@@ -1419,20 +1273,10 @@ async fn get_snapshot(
                     .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", snapshot_name)))
                     .body(data))
             }
-            Err(e) => {
-                Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": {
-                        "error": format!("Failed to read snapshot file: {}", e)
-                    }
-                })))
-            }
+            Err(e) => Ok(qdrant_error(&format!("Failed to read snapshot file: {}", e), start_time)),
         }
     } else {
-        Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": {
-                "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
-            }
-        })))
+        Ok(qdrant_not_found(&format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name), start_time))
     }
 }
 
@@ -1440,28 +1284,13 @@ async fn delete_snapshot(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let (collection_name, snapshot_name) = path.into_inner();
     
     match storage.delete_collection_snapshot(&collection_name, &snapshot_name) {
-        Ok(true) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "result": true
-            })))
-        }
-        Ok(false) => {
-            Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": {
-                    "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
-                }
-            })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": {
-                    "error": e.to_string()
-                }
-            })))
-        }
+        Ok(true) => Ok(qdrant_response(true, start_time)),
+        Ok(false) => Ok(qdrant_not_found(&format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name), start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
 }
 
@@ -1470,6 +1299,7 @@ async fn upload_snapshot(
     path: web::Path<String>,
     mut payload: Multipart,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
     
     let mut snapshot_data: Option<Vec<u8>> = None;
@@ -1480,11 +1310,7 @@ async fn upload_snapshot(
         let mut field = match item {
             Ok(f) => f,
             Err(e) => {
-                return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                    "status": {
-                        "error": format!("Failed to parse multipart: {}", e)
-                    }
-                })));
+                return Ok(qdrant_error(&format!("Failed to parse multipart: {}", e), start_time));
             }
         };
         
@@ -1504,11 +1330,7 @@ async fn upload_snapshot(
                 match chunk {
                     Ok(bytes) => data.extend_from_slice(&bytes),
                     Err(e) => {
-                        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                            "status": {
-                                "error": format!("Failed to read file data: {}", e)
-                            }
-                        })));
+                        return Ok(qdrant_error(&format!("Failed to read file data: {}", e), start_time));
                     }
                 }
             }
@@ -1520,31 +1342,17 @@ async fn upload_snapshot(
     let data = match snapshot_data {
         Some(d) => d,
         None => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "status": {
-                    "error": "No snapshot file provided in multipart form"
-                }
-            })));
+            return Ok(qdrant_error("No snapshot file provided in multipart form", start_time));
         }
     };
     
     // Save and restore the snapshot
     match storage.upload_and_restore_snapshot(&collection_name, &data, filename.as_deref()) {
-        Ok(collection) => {
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "result": {
-                    "collection": collection_name,
-                    "points_count": collection.count()
-                }
-            })))
-        }
-        Err(e) => {
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": {
-                    "error": format!("Failed to restore snapshot: {}", e)
-                }
-            })))
-        }
+        Ok(collection) => Ok(qdrant_response(serde_json::json!({
+            "collection": collection_name,
+            "points_count": collection.count()
+        }), start_time)),
+        Err(e) => Ok(qdrant_error(&format!("Failed to restore snapshot: {}", e), start_time)),
     }
 }
 
@@ -1552,42 +1360,39 @@ async fn upload_snapshot(
 
 /// Update aliases (stub - aliases not yet implemented)
 async fn update_aliases() -> ActixResult<HttpResponse> {
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": true
-    })))
+    let start_time = Instant::now();
+    Ok(qdrant_response(true, start_time))
 }
 
 /// List collection aliases
 async fn list_collection_aliases(
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let _collection_name = path.into_inner();
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "aliases": []
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "aliases": []
+    }), start_time))
 }
 
 /// Collection cluster info
 async fn collection_cluster_info(
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let collection_name = path.into_inner();
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "peer_id": 0,
-            "shard_count": 1,
-            "local_shards": [{
-                "shard_id": 0,
-                "points_count": 0,
-                "state": "Active"
-            }],
-            "remote_shards": [],
-            "shard_transfers": [],
-            "collection_name": collection_name
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "peer_id": 0,
+        "shard_count": 1,
+        "local_shards": [{
+            "shard_id": 0,
+            "points_count": 0,
+            "state": "Active"
+        }],
+        "remote_shards": [],
+        "shard_transfers": [],
+        "collection_name": collection_name
+    }), start_time))
 }
 
 /// Get multiple points by IDs
@@ -1605,14 +1410,13 @@ async fn get_points_by_ids(
     path: web::Path<String>,
     req: web::Json<GetPointsRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": { "error": "Collection not found" }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -1641,9 +1445,7 @@ async fn get_points_by_ids(
         }
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": points
-    })))
+    Ok(qdrant_response(points, start_time))
 }
 
 /// Count points in collection
@@ -1660,22 +1462,19 @@ async fn count_points(
     path: web::Path<String>,
     _req: web::Json<CountRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": { "error": "Collection not found" }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "count": collection.count()
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "count": collection.count()
+    }), start_time))
 }
 
 /// Set payload on points
@@ -1693,21 +1492,18 @@ async fn set_payload(
     path: web::Path<String>,
     _req: web::Json<SetPayloadRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
     // Note: payload update not fully implemented
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Overwrite payload on points
@@ -1734,20 +1530,17 @@ async fn delete_payload(
     path: web::Path<String>,
     _req: web::Json<DeletePayloadRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Clear all payload from points
@@ -1764,20 +1557,17 @@ async fn clear_payload(
     path: web::Path<String>,
     _req: web::Json<ClearPayloadRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Update vectors on existing points
@@ -1791,20 +1581,17 @@ async fn update_vectors(
     path: web::Path<String>,
     _req: web::Json<UpdateVectorsRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Delete vectors from points
@@ -1823,20 +1610,17 @@ async fn delete_vectors(
     path: web::Path<String>,
     _req: web::Json<DeleteVectorsRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Batch update operations
@@ -1850,17 +1634,14 @@ async fn batch_update(
     path: web::Path<String>,
     _req: web::Json<BatchUpdateRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": []
-    })))
+    Ok(qdrant_response(Vec::<serde_json::Value>::new(), start_time))
 }
 
 /// Batch search
@@ -1874,17 +1655,14 @@ async fn batch_search(
     path: web::Path<String>,
     _req: web::Json<BatchSearchRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": []
-    })))
+    Ok(qdrant_response(Vec::<serde_json::Value>::new(), start_time))
 }
 
 /// Batch query
@@ -1898,17 +1676,14 @@ async fn batch_query(
     path: web::Path<String>,
     _req: web::Json<BatchQueryRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": []
-    })))
+    Ok(qdrant_response(Vec::<serde_json::Value>::new(), start_time))
 }
 
 /// Query points with grouping
@@ -1933,14 +1708,13 @@ async fn query_groups(
     path: web::Path<String>,
     req: web::Json<QueryGroupsRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": { "error": "Collection not found" }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -1959,16 +1733,12 @@ async fn query_groups(
             match vec {
                 Ok(v) => Vector::new(v),
                 Err(_) => {
-                    return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                        "status": { "error": "Invalid query vector" }
-                    })));
+                    return Ok(qdrant_error("Invalid query vector", start_time));
                 }
             }
         }
         _ => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "status": { "error": "Query must be a vector array" }
-            })));
+            return Ok(qdrant_error("Query must be a vector array", start_time));
         }
     };
     
@@ -2031,11 +1801,9 @@ async fn query_groups(
         })
         .collect();
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "groups": group_results
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "groups": group_results
+    }), start_time))
 }
 
 /// Create field index
@@ -2051,20 +1819,17 @@ async fn create_field_index(
     path: web::Path<String>,
     _req: web::Json<CreateIndexRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Delete field index
@@ -2072,20 +1837,17 @@ async fn delete_field_index(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let (name, _field_name) = path.into_inner();
     
     if storage.get_collection(&name).is_none() {
-        return Ok(HttpResponse::NotFound().json(serde_json::json!({
-            "status": { "error": "Collection not found" }
-        })));
+        return Ok(qdrant_not_found("Collection not found", start_time));
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": {
-            "operation_id": 0,
-            "status": "completed"
-        }
-    })))
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": 0,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Recommend points based on positive/negative examples
@@ -2113,14 +1875,13 @@ async fn recommend_points(
     path: web::Path<String>,
     req: web::Json<RecommendRequest>,
 ) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
     let name = path.into_inner();
     
     let collection = match storage.get_collection(&name) {
         Some(c) => c,
         None => {
-            return Ok(HttpResponse::NotFound().json(serde_json::json!({
-                "status": { "error": "Collection not found" }
-            })));
+            return Ok(qdrant_not_found("Collection not found", start_time));
         }
     };
 
@@ -2153,9 +1914,7 @@ async fn recommend_points(
     }
     
     if positive_vectors.is_empty() {
-        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "status": { "error": "At least one valid positive example is required" }
-        })));
+        return Ok(qdrant_error("At least one valid positive example is required", start_time));
     }
     
     // Collect negative vectors and compute average
@@ -2256,8 +2015,6 @@ async fn recommend_points(
         }
     }
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "result": results
-    })))
+    Ok(qdrant_response(results, start_time))
 }
 
