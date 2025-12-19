@@ -12,6 +12,8 @@ use crate::persistence::ForkBasedPersistence;
 /// Manages collections and persistence
 pub struct StorageManager {
     collections: Arc<RwLock<HashMap<String, Arc<Collection>>>>,
+    /// Aliases: alias_name -> collection_name
+    aliases: Arc<RwLock<HashMap<String, String>>>,
     data_dir: PathBuf,
     #[allow(dead_code)]
     lmdb: Option<Arc<LmdbStorage>>,
@@ -43,6 +45,7 @@ impl StorageManager {
         let persistence = Arc::new(ForkBasedPersistence::new(&data_dir));
 
         let collections = Arc::new(RwLock::new(HashMap::new()));
+        let aliases = Arc::new(RwLock::new(HashMap::new()));
         
         if let Some(snapshot) = persistence.load_snapshot()
             .map_err(|e| Error::Persistence(e.to_string()))? {
@@ -85,6 +88,7 @@ impl StorageManager {
 
         let manager = Self {
             collections,
+            aliases,
             data_dir,
             lmdb: Some(lmdb),
             wal: Some(wal),
@@ -133,7 +137,17 @@ impl StorageManager {
 
     #[inline]
     pub fn get_collection(&self, name: &str) -> Option<Arc<Collection>> {
-        self.collections.read().get(name).cloned()
+        let collections = self.collections.read();
+        // First try direct collection lookup
+        if let Some(col) = collections.get(name) {
+            return Some(col.clone());
+        }
+        // Then try alias lookup
+        let aliases = self.aliases.read();
+        if let Some(collection_name) = aliases.get(name) {
+            return collections.get(collection_name).cloned();
+        }
+        None
     }
 
     pub fn delete_collection(&self, name: &str) -> Result<bool> {
@@ -151,6 +165,51 @@ impl StorageManager {
     #[must_use]
     pub fn collection_exists(&self, name: &str) -> bool {
         self.collections.read().contains_key(name)
+    }
+
+    /// Create an alias for a collection
+    pub fn create_alias(&self, alias_name: &str, collection_name: &str) -> Result<bool> {
+        // Check that collection exists
+        if !self.collection_exists(collection_name) {
+            return Err(Error::CollectionNotFound(collection_name.to_string()));
+        }
+        let mut aliases = self.aliases.write();
+        aliases.insert(alias_name.to_string(), collection_name.to_string());
+        Ok(true)
+    }
+
+    /// Delete an alias
+    pub fn delete_alias(&self, alias_name: &str) -> Result<bool> {
+        let mut aliases = self.aliases.write();
+        Ok(aliases.remove(alias_name).is_some())
+    }
+
+    /// Rename an alias
+    pub fn rename_alias(&self, old_alias: &str, new_alias: &str) -> Result<bool> {
+        let mut aliases = self.aliases.write();
+        if let Some(collection_name) = aliases.remove(old_alias) {
+            aliases.insert(new_alias.to_string(), collection_name);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all aliases
+    pub fn list_aliases(&self) -> Vec<(String, String)> {
+        self.aliases.read()
+            .iter()
+            .map(|(alias, collection)| (alias.clone(), collection.clone()))
+            .collect()
+    }
+
+    /// List aliases for a specific collection
+    pub fn list_collection_aliases(&self, collection_name: &str) -> Vec<String> {
+        self.aliases.read()
+            .iter()
+            .filter(|(_, col)| *col == collection_name)
+            .map(|(alias, _)| alias.clone())
+            .collect()
     }
 
     #[inline]

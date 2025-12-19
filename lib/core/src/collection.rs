@@ -33,6 +33,17 @@ pub enum Distance {
     Dot,
 }
 
+/// Payload field index type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadIndexType {
+    Keyword,
+    Integer,
+    Float,
+    Bool,
+    Geo,
+    Text,
+}
+
 /// A collection of vectors with metadata
 pub struct Collection {
     config: CollectionConfig,
@@ -43,6 +54,8 @@ pub struct Collection {
     hnsw_rebuilding: Arc<AtomicBool>,
     batch_mode: Arc<RwLock<bool>>,
     pending_points: Arc<RwLock<Vec<Point>>>,
+    /// Payload field indexes
+    payload_indexes: Arc<RwLock<HashMap<String, PayloadIndexType>>>,
 }
 
 impl Collection {
@@ -68,6 +81,7 @@ impl Collection {
             hnsw_rebuilding: Arc::new(AtomicBool::new(false)),
             batch_mode: Arc::new(RwLock::new(false)),
             pending_points: Arc::new(RwLock::new(Vec::new())),
+            payload_indexes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -120,7 +134,8 @@ impl Collection {
 
     /// Insert or update a point
     pub fn upsert(&self, point: Point) -> Result<()> {
-        if point.vector.dim() != self.config.vector_dim {
+        // Skip dimension check for sparse-only collections (vector_dim == 0)
+        if self.config.vector_dim > 0 && point.vector.dim() != self.config.vector_dim {
             return Err(Error::InvalidDimension {
                 expected: self.config.vector_dim,
                 actual: point.vector.dim(),
@@ -236,6 +251,124 @@ impl Collection {
 
         let mut points = self.points.write();
         Ok(points.remove(id).is_some())
+    }
+
+    /// Set payload values for a point (merge with existing)
+    pub fn set_payload(&self, id: &str, payload: serde_json::Value) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            if let Some(existing) = &mut point.payload {
+                if let (Some(existing_obj), Some(new_obj)) = (existing.as_object_mut(), payload.as_object()) {
+                    for (key, value) in new_obj {
+                        existing_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            } else {
+                point.payload = Some(payload);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Overwrite entire payload for a point
+    pub fn overwrite_payload(&self, id: &str, payload: serde_json::Value) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            point.payload = Some(payload);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Delete specific payload keys from a point
+    pub fn delete_payload_keys(&self, id: &str, keys: &[String]) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            if let Some(payload) = &mut point.payload {
+                if let Some(obj) = payload.as_object_mut() {
+                    for key in keys {
+                        obj.remove(key);
+                    }
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Clear all payload from a point
+    pub fn clear_payload(&self, id: &str) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            point.payload = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Update vector for a point
+    pub fn update_vector(&self, id: &str, vector: Vector) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            point.vector = vector.clone();
+            
+            // Update HNSW index if present
+            if let Some(hnsw) = &self.hnsw {
+                let mut index = hnsw.write();
+                index.remove(id);
+                // Insert the updated point
+                index.insert(point.clone());
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Update multivector for a point
+    pub fn update_multivector(&self, id: &str, multivector: Option<MultiVector>) -> Result<bool> {
+        let mut points = self.points.write();
+        if let Some(point) = points.get_mut(id) {
+            point.multivector = multivector;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Delete vector (set to empty) - for named vectors this would delete specific vector
+    pub fn delete_vector(&self, id: &str) -> Result<bool> {
+        // For now, deleting a vector means deleting the point
+        // In full implementation, named vectors would be individually deletable
+        self.delete(id)
+    }
+
+    /// Create a payload field index
+    pub fn create_payload_index(&self, field_name: &str, index_type: PayloadIndexType) -> Result<bool> {
+        let mut indexes = self.payload_indexes.write();
+        indexes.insert(field_name.to_string(), index_type);
+        Ok(true)
+    }
+
+    /// Delete a payload field index
+    pub fn delete_payload_index(&self, field_name: &str) -> Result<bool> {
+        let mut indexes = self.payload_indexes.write();
+        Ok(indexes.remove(field_name).is_some())
+    }
+
+    /// Get all payload indexes
+    pub fn get_payload_indexes(&self) -> HashMap<String, PayloadIndexType> {
+        self.payload_indexes.read().clone()
+    }
+
+    /// Check if a field is indexed
+    pub fn is_field_indexed(&self, field_name: &str) -> bool {
+        self.payload_indexes.read().contains_key(field_name)
     }
 
     /// Pre-warm HNSW index

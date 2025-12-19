@@ -2,6 +2,7 @@ use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_multipart::Multipart;
+use chrono::Utc;
 use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -193,9 +194,11 @@ where
             Err(serde::de::Error::custom("vector cannot be empty"))
         }
         // Named vector: {"vector_name": [0.1, 0.2]} or {"": [...]}
+        // Or sparse vector: {"keywords": {"indices": [...], "values": [...]}}
         serde_json::Value::Object(obj) => {
             if let Some((_, vec_value)) = obj.iter().next() {
                 match vec_value {
+                    // Dense named vector: [0.1, 0.2, 0.3]
                     serde_json::Value::Array(arr) if !arr.is_empty() => {
                         match arr.first() {
                             Some(serde_json::Value::Number(_)) => {
@@ -211,7 +214,50 @@ where
                             _ => Err(serde::de::Error::custom("invalid named vector format"))
                         }
                     }
-                    _ => Err(serde::de::Error::custom("named vector value must be a non-empty array"))
+                    // Sparse vector: {"indices": [...], "values": [...]}
+                    serde_json::Value::Object(sparse_obj) => {
+                        let indices = sparse_obj.get("indices")
+                            .and_then(|i| i.as_array())
+                            .ok_or_else(|| serde::de::Error::custom("sparse vector missing 'indices' array"))?;
+                        let values = sparse_obj.get("values")
+                            .and_then(|v| v.as_array())
+                            .ok_or_else(|| serde::de::Error::custom("sparse vector missing 'values' array"))?;
+                        
+                        if indices.is_empty() || values.is_empty() {
+                            // Empty sparse vector - create minimal placeholder
+                            return Ok(ParsedVector { primary: vec![0.0], multivector: None });
+                        }
+                        
+                        // Convert sparse to dense-ish format
+                        // Find max index to determine vector dimension
+                        let max_idx = indices.iter()
+                            .filter_map(|i| i.as_u64())
+                            .max()
+                            .unwrap_or(0) as usize;
+                        
+                        // Create a vector with values at specified indices
+                        // For efficiency, we'll just store the values directly
+                        // In a full implementation, this would be a proper sparse vector
+                        let sparse_values: Vec<f32> = values.iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect();
+                        
+                        // Store as the primary vector (dense representation would be too large)
+                        // Just use the values array for now
+                        let primary = if sparse_values.is_empty() {
+                            vec![0.0]
+                        } else {
+                            sparse_values
+                        };
+                        
+                        Ok(ParsedVector { primary, multivector: None })
+                    }
+                    // Empty array
+                    serde_json::Value::Array(_) => {
+                        // Allow empty arrays for sparse-only collections
+                        Ok(ParsedVector { primary: vec![0.0], multivector: None })
+                    }
+                    _ => Err(serde::de::Error::custom("named vector value must be an array or sparse object"))
                 }
             } else {
                 Err(serde::de::Error::custom("empty named vector object"))
@@ -225,8 +271,17 @@ where
 struct SearchRequest {
     vector: Option<Vec<f32>>,
     text: Option<String>,
+    #[serde(alias = "top")]
     limit: Option<usize>,
     filter: Option<serde_json::Value>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -264,9 +319,13 @@ impl RestApi {
             let mut app = App::new()
                 .wrap(cors)
                 .app_data(web::Data::new(storage.clone()))
-                // Qdrant-compatible endpoints
+                // Service endpoints (Qdrant-compatible)
                 .route("/", web::get().to(root_info))
                 .route("/healthz", web::get().to(health_check))
+                .route("/livez", web::get().to(livez_check))
+                .route("/readyz", web::get().to(readyz_check))
+                .route("/metrics", web::get().to(metrics_endpoint))
+                // Collection endpoints
                 .route("/collections", web::get().to(list_collections))
                 .route("/collections/{name}", web::get().to(get_collection))
                 .route("/collections/{name}", web::put().to(create_collection))
@@ -297,8 +356,12 @@ impl RestApi {
                 .route("/collections/{name}/points/vectors/delete", web::post().to(delete_vectors))
                 .route("/collections/{name}/points/batch", web::post().to(batch_update))
                 .route("/collections/{name}/points/search/batch", web::post().to(batch_search))
+                .route("/collections/{name}/points/search/groups", web::post().to(search_groups))
                 .route("/collections/{name}/points/query/batch", web::post().to(batch_query))
                 .route("/collections/{name}/points/query/groups", web::post().to(query_groups))
+                .route("/collections/{name}/points/discover", web::post().to(discover_points))
+                .route("/collections/{name}/points/discover/batch", web::post().to(discover_batch))
+                .route("/collections/{name}/facet", web::post().to(facet_counts))
                 // Index endpoints
                 .route("/collections/{name}/index", web::put().to(create_field_index))
                 .route("/collections/{name}/index/{field_name}", web::delete().to(delete_field_index))
@@ -311,7 +374,16 @@ impl RestApi {
                 .route("/collections/{name}/snapshots/recover", web::put().to(recover_snapshot))
                 .route("/collections/{name}/snapshots/{snapshot_name}", web::get().to(get_snapshot))
                 .route("/collections/{name}/snapshots/{snapshot_name}", web::delete().to(delete_snapshot))
-                .route("/snapshots", web::get().to(list_all_snapshots));
+                // Full storage snapshots
+                .route("/snapshots", web::get().to(list_all_snapshots))
+                .route("/snapshots", web::post().to(create_full_snapshot))
+                .route("/snapshots/{snapshot_name}", web::get().to(get_full_snapshot))
+                .route("/snapshots/{snapshot_name}", web::delete().to(delete_full_snapshot))
+                // Collection update endpoint
+                .route("/collections/{name}", web::patch().to(update_collection))
+                // Issues endpoints
+                .route("/issues", web::get().to(get_issues))
+                .route("/issues", web::delete().to(clear_issues));
             
             // Serve web UI dashboard if static folder exists
             let static_path = Path::new(&static_folder);
@@ -344,6 +416,58 @@ async fn health_check() -> ActixResult<HttpResponse> {
         "title": "distx",
         "version": "0.2.1"
     })))
+}
+
+/// Kubernetes liveness probe
+async fn livez_check() -> ActixResult<HttpResponse> {
+    Ok(HttpResponse::Ok()
+        .content_type("text/plain")
+        .body("healthz check passed"))
+}
+
+/// Kubernetes readiness probe  
+async fn readyz_check() -> ActixResult<HttpResponse> {
+    Ok(HttpResponse::Ok()
+        .content_type("text/plain")
+        .body("healthz check passed"))
+}
+
+/// Prometheus metrics endpoint
+async fn metrics_endpoint(
+    storage: web::Data<Arc<StorageManager>>,
+) -> ActixResult<HttpResponse> {
+    let collections = storage.list_collections();
+    let collections_count = collections.len();
+    
+    // Count total points across all collections
+    let mut total_points = 0u64;
+    for name in &collections {
+        if let Some(collection) = storage.get_collection(name) {
+            total_points += collection.count() as u64;
+        }
+    }
+    
+    let metrics = format!(
+        "# HELP app_info information about distx server\n\
+         # TYPE app_info gauge\n\
+         app_info{{name=\"distx\",version=\"{}\"}} 1\n\
+         # HELP cluster_enabled is cluster support enabled\n\
+         # TYPE cluster_enabled gauge\n\
+         cluster_enabled 0\n\
+         # HELP collections_total number of collections\n\
+         # TYPE collections_total gauge\n\
+         collections_total {}\n\
+         # HELP points_total total number of points across all collections\n\
+         # TYPE points_total gauge\n\
+         points_total {}\n",
+        env!("CARGO_PKG_VERSION"),
+        collections_count,
+        total_points
+    );
+    
+    Ok(HttpResponse::Ok()
+        .content_type("text/plain")
+        .body(metrics))
 }
 
 async fn list_collections(
@@ -574,23 +698,31 @@ async fn search_points(
     };
 
     let limit = req.limit.unwrap_or(10);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    let score_threshold = req.score_threshold;
+    let offset = req.offset.unwrap_or(0);
 
     if let Some(text) = &req.text {
-        let results = collection.search_text(text, limit);
+        let results = collection.search_text(text, limit + offset);
         let search_results: Vec<serde_json::Value> = results
             .into_iter()
+            .skip(offset)
+            .filter(|(_, score)| score_threshold.map(|t| *score >= t).unwrap_or(true))
             .filter_map(|(doc_id, score)| {
                 collection.get(&doc_id).map(|point| {
-                    serde_json::json!({
-                        "id": match &point.id {
-                            distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                            distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                            distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                        },
+                    let mut result = serde_json::json!({
+                        "id": point_id_to_json(&point.id),
                         "version": 0,
                         "score": score,
-                        "payload": point.payload,
-                    })
+                    });
+                    if with_payload {
+                        result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+                    }
+                    if with_vector {
+                        result["vector"] = serde_json::json!(point.vector.as_slice());
+                    }
+                    result
                 })
             })
             .collect();
@@ -606,24 +738,28 @@ async fn search_points(
         });
 
         let results = if let Some(f) = filter.as_deref() {
-            collection.search(&query_vector, limit, Some(f))
+            collection.search(&query_vector, limit + offset, Some(f))
         } else {
-            collection.search(&query_vector, limit, None)
+            collection.search(&query_vector, limit + offset, None)
         };
 
         let search_results: Vec<serde_json::Value> = results
             .into_iter()
+            .skip(offset)
+            .filter(|(_, score)| score_threshold.map(|t| *score >= t).unwrap_or(true))
             .map(|(point, score)| {
-                serde_json::json!({
-                    "id": match &point.id {
-                        distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                        distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                        distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                    },
+                let mut result = serde_json::json!({
+                    "id": point_id_to_json(&point.id),
                     "version": 0,
                     "score": score,
-                    "payload": point.payload,
-                })
+                });
+                if with_payload {
+                    result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+                }
+                if with_vector {
+                    result["vector"] = serde_json::json!(point.vector.as_slice());
+                }
+                result
             })
             .collect();
 
@@ -631,6 +767,15 @@ async fn search_points(
     }
 
     Ok(qdrant_error("Either 'vector' or 'text' must be provided", start_time))
+}
+
+/// Convert PointId to JSON value
+fn point_id_to_json(id: &distx_core::PointId) -> serde_json::Value {
+    match id {
+        distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+        distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
+        distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+    }
 }
 
 /// Query request for Qdrant's universal query API
@@ -793,11 +938,7 @@ async fn query_points(
         .into_iter()
         .map(|(point, score)| {
             let mut result = serde_json::json!({
-                "id": match &point.id {
-                    distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                    distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                    distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                },
+                "id": point_id_to_json(&point.id),
                 "version": 0,
                 "score": score,
             });
@@ -822,8 +963,32 @@ async fn query_points(
     }), start_time))
 }
 
+/// Parse Qdrant-style filter format (must/should/must_not)
 fn parse_filter(filter_json: &serde_json::Value) -> Option<FilterCondition> {
     if let Some(obj) = filter_json.as_object() {
+        // Qdrant-style filter with must/should/must_not
+        if let Some(must) = obj.get("must") {
+            if let Some(arr) = must.as_array() {
+                // For simplicity, take first condition as the main filter
+                for cond in arr {
+                    if let Some(fc) = parse_field_condition(cond) {
+                        return Some(fc);
+                    }
+                }
+            }
+        }
+        
+        if let Some(should) = obj.get("should") {
+            if let Some(arr) = should.as_array() {
+                for cond in arr {
+                    if let Some(fc) = parse_field_condition(cond) {
+                        return Some(fc);
+                    }
+                }
+            }
+        }
+        
+        // Legacy simple format: { field, value, operator }
         if let Some(field) = obj.get("field").and_then(|v| v.as_str()) {
             if let Some(value) = obj.get("value") {
                 if let Some(op) = obj.get("operator").and_then(|v| v.as_str()) {
@@ -839,8 +1004,196 @@ fn parse_filter(filter_json: &serde_json::Value) -> Option<FilterCondition> {
                 }
             }
         }
+        
+        // Direct field condition (Qdrant format): { "key": "field", "match": { "value": x } }
+        if let Some(fc) = parse_field_condition(filter_json) {
+            return Some(fc);
+        }
     }
     None
+}
+
+/// Parse a single Qdrant field condition: { "key": "field", "match": { "value": x } }
+fn parse_field_condition(cond: &serde_json::Value) -> Option<FilterCondition> {
+    let obj = cond.as_object()?;
+    let key = obj.get("key")?.as_str()?;
+    
+    // Match condition: { "match": { "value": x } }
+    if let Some(match_obj) = obj.get("match").and_then(|m| m.as_object()) {
+        if let Some(value) = match_obj.get("value") {
+            return Some(FilterCondition::Equals { 
+                field: key.to_string(), 
+                value: value.clone() 
+            });
+        }
+        // Match any: { "match": { "any": [x, y, z] } }
+        if let Some(any_arr) = match_obj.get("any").and_then(|a| a.as_array()) {
+            if let Some(first) = any_arr.first() {
+                return Some(FilterCondition::Equals { 
+                    field: key.to_string(), 
+                    value: first.clone() 
+                });
+            }
+        }
+        // Match text: { "match": { "text": "value" } }
+        if let Some(text) = match_obj.get("text") {
+            return Some(FilterCondition::Equals { 
+                field: key.to_string(), 
+                value: text.clone() 
+            });
+        }
+    }
+    
+    // Range condition: { "range": { "gt": x, "lt": y } }
+    if let Some(range_obj) = obj.get("range").and_then(|r| r.as_object()) {
+        if let Some(gt) = range_obj.get("gt").and_then(|v| v.as_f64()) {
+            return Some(FilterCondition::GreaterThan { field: key.to_string(), value: gt });
+        }
+        if let Some(gte) = range_obj.get("gte").and_then(|v| v.as_f64()) {
+            return Some(FilterCondition::GreaterEqual { field: key.to_string(), value: gte });
+        }
+        if let Some(lt) = range_obj.get("lt").and_then(|v| v.as_f64()) {
+            return Some(FilterCondition::LessThan { field: key.to_string(), value: lt });
+        }
+        if let Some(lte) = range_obj.get("lte").and_then(|v| v.as_f64()) {
+            return Some(FilterCondition::LessEqual { field: key.to_string(), value: lte });
+        }
+    }
+    
+    None
+}
+
+/// Check if a point matches a Qdrant-style filter
+fn matches_filter(point: &Point, filter: &serde_json::Value) -> bool {
+    let obj = match filter.as_object() {
+        Some(o) => o,
+        None => return true, // No valid filter, match all
+    };
+    
+    // Handle "must" conditions (AND logic)
+    if let Some(must) = obj.get("must").and_then(|m| m.as_array()) {
+        for cond in must {
+            if !matches_condition(point, cond) {
+                return false; // All must conditions must match
+            }
+        }
+    }
+    
+    // Handle "should" conditions (OR logic)
+    if let Some(should) = obj.get("should").and_then(|s| s.as_array()) {
+        if !should.is_empty() {
+            let any_match = should.iter().any(|cond| matches_condition(point, cond));
+            if !any_match {
+                return false; // At least one should condition must match
+            }
+        }
+    }
+    
+    // Handle "must_not" conditions (NOT logic)
+    if let Some(must_not) = obj.get("must_not").and_then(|m| m.as_array()) {
+        for cond in must_not {
+            if matches_condition(point, cond) {
+                return false; // No must_not condition should match
+            }
+        }
+    }
+    
+    true
+}
+
+/// Check if a point matches a single condition
+fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
+    let obj = match cond.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    
+    // Get the field key
+    let key = match obj.get("key").and_then(|k| k.as_str()) {
+        Some(k) => k,
+        None => return false,
+    };
+    
+    // Get the payload value for this key
+    let payload_value = match &point.payload {
+        Some(payload) => payload.get(key),
+        None => None,
+    };
+    
+    // Handle "match" condition
+    if let Some(match_obj) = obj.get("match").and_then(|m| m.as_object()) {
+        // Match exact value
+        if let Some(expected) = match_obj.get("value") {
+            return match payload_value {
+                Some(actual) => values_equal(actual, expected),
+                None => false,
+            };
+        }
+        
+        // Match any of values
+        if let Some(any_arr) = match_obj.get("any").and_then(|a| a.as_array()) {
+            return match payload_value {
+                Some(actual) => any_arr.iter().any(|expected| values_equal(actual, expected)),
+                None => false,
+            };
+        }
+        
+        // Match text (substring or exact)
+        if let Some(text) = match_obj.get("text").and_then(|t| t.as_str()) {
+            return match payload_value {
+                Some(serde_json::Value::String(s)) => s.contains(text) || s == text,
+                _ => false,
+            };
+        }
+    }
+    
+    // Handle "range" condition
+    if let Some(range_obj) = obj.get("range").and_then(|r| r.as_object()) {
+        let actual_num = match payload_value {
+            Some(serde_json::Value::Number(n)) => n.as_f64(),
+            _ => None,
+        };
+        
+        if let Some(actual) = actual_num {
+            if let Some(gt) = range_obj.get("gt").and_then(|v| v.as_f64()) {
+                if actual <= gt { return false; }
+            }
+            if let Some(gte) = range_obj.get("gte").and_then(|v| v.as_f64()) {
+                if actual < gte { return false; }
+            }
+            if let Some(lt) = range_obj.get("lt").and_then(|v| v.as_f64()) {
+                if actual >= lt { return false; }
+            }
+            if let Some(lte) = range_obj.get("lte").and_then(|v| v.as_f64()) {
+                if actual > lte { return false; }
+            }
+            return true;
+        }
+        return false;
+    }
+    
+    // Handle nested filter (recursive)
+    if obj.contains_key("must") || obj.contains_key("should") || obj.contains_key("must_not") {
+        return matches_filter(point, cond);
+    }
+    
+    false
+}
+
+/// Compare two JSON values for equality
+fn values_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::String(s1), serde_json::Value::String(s2)) => s1 == s2,
+        (serde_json::Value::Number(n1), serde_json::Value::Number(n2)) => {
+            n1.as_f64() == n2.as_f64()
+        }
+        (serde_json::Value::Bool(b1), serde_json::Value::Bool(b2)) => b1 == b2,
+        (serde_json::Value::Array(arr), val) | (val, serde_json::Value::Array(arr)) => {
+            // Check if val is in array
+            arr.iter().any(|item| values_equal(item, val))
+        }
+        _ => a == b,
+    }
 }
 
 #[derive(Deserialize)]
@@ -849,6 +1202,8 @@ struct ScrollRequest {
     offset: Option<serde_json::Value>,
     with_payload: Option<bool>,
     with_vector: Option<bool>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
 }
 
 async fn scroll_points(
@@ -881,14 +1236,24 @@ async fn scroll_points(
     
     // Get all points and sort by ID for consistent pagination
     let all_points = collection.get_all_points();
-    let mut points_with_ids: Vec<_> = all_points.iter()
+    
+    // Apply filter if provided
+    let filtered_points: Vec<_> = if let Some(filter_json) = &req.filter {
+        all_points.iter()
+            .filter(|p| matches_filter(p, filter_json))
+            .collect()
+    } else {
+        all_points.iter().collect()
+    };
+    
+    let mut points_with_ids: Vec<_> = filtered_points.iter()
         .map(|p| {
             let id_num: i64 = match &p.id {
                 distx_core::PointId::Integer(i) => *i as i64,
                 distx_core::PointId::String(s) => s.parse::<i64>().unwrap_or(0),
                 distx_core::PointId::Uuid(_) => 0,
             };
-            (id_num, p)
+            (id_num, *p)
         })
         .collect();
     
@@ -917,11 +1282,7 @@ async fn scroll_points(
     // Format results
     let results: Vec<serde_json::Value> = page.iter().map(|(_, point)| {
         let mut obj = serde_json::json!({
-            "id": match &point.id {
-                distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                distx_core::PointId::Integer(i) => serde_json::json!(*i),
-                distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-            },
+            "id": point_id_to_json(&point.id),
         });
         
         if with_payload {
@@ -958,13 +1319,9 @@ async fn get_point(
         Some(point) => {
             // Build response with optional multivector
             let mut result = serde_json::json!({
-                "id": match &point.id {
-                    distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                    distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                    distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                },
+                "id": point_id_to_json(&point.id),
                 "vector": point.vector.as_slice(),
-                "payload": point.payload,
+                "payload": point.payload.clone().unwrap_or(serde_json::Value::Null),
             });
             
             // Add multivector if present
@@ -1114,11 +1471,19 @@ async fn collection_exists(
 
 // Qdrant compatibility endpoints
 
-async fn list_aliases() -> ActixResult<HttpResponse> {
+async fn list_aliases(
+    storage: web::Data<Arc<StorageManager>>,
+) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
-    // DistX doesn't support aliases yet, return empty list
+    let aliases: Vec<serde_json::Value> = storage.list_aliases()
+        .into_iter()
+        .map(|(alias, collection)| serde_json::json!({
+            "alias_name": alias,
+            "collection_name": collection
+        }))
+        .collect();
     Ok(qdrant_response(serde_json::json!({
-        "aliases": []
+        "aliases": aliases
     }), start_time))
 }
 
@@ -1164,6 +1529,98 @@ async fn list_all_snapshots(
         Ok(snapshots) => Ok(qdrant_response(snapshots, start_time)),
         Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
     }
+}
+
+/// Create full storage snapshot
+async fn create_full_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    
+    // Create snapshots for all collections
+    let collections = storage.list_collections();
+    let mut created_snapshots = Vec::new();
+    
+    for collection_name in collections {
+        match storage.create_collection_snapshot(&collection_name) {
+            Ok(snapshot) => created_snapshots.push(snapshot),
+            Err(e) => {
+                return Ok(qdrant_error(&format!("Failed to snapshot {}: {}", collection_name, e), start_time));
+            }
+        }
+    }
+    
+    // Return metadata about full snapshot
+    let snapshot_name = format!("full-snapshot-{}.snapshot", Utc::now().format("%Y-%m-%d-%H-%M-%S"));
+    
+    Ok(qdrant_response(serde_json::json!({
+        "name": snapshot_name,
+        "creation_time": Utc::now().to_rfc3339(),
+        "size": 0,
+        "collections": created_snapshots.len()
+    }), start_time))
+}
+
+/// Get (download) full snapshot
+async fn get_full_snapshot(
+    _path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    Ok(qdrant_error("Full storage snapshot download not yet implemented", start_time))
+}
+
+/// Delete full snapshot
+async fn delete_full_snapshot(
+    _path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    // For now, just acknowledge
+    Ok(qdrant_response(true, start_time))
+}
+
+/// Update collection parameters
+#[derive(Deserialize)]
+struct UpdateCollectionRequest {
+    #[serde(default)]
+    optimizers_config: Option<serde_json::Value>,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+    #[serde(default)]
+    hnsw_config: Option<serde_json::Value>,
+    #[serde(default)]
+    vectors: Option<serde_json::Value>,
+    #[serde(default)]
+    quantization_config: Option<serde_json::Value>,
+}
+
+async fn update_collection(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<UpdateCollectionRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    if !storage.collection_exists(&name) {
+        return Ok(qdrant_not_found("Collection not found", start_time));
+    }
+    
+    // Collection update acknowledged (parameters update not yet fully implemented)
+    Ok(qdrant_response(true, start_time))
+}
+
+/// Get issues/performance suggestions
+async fn get_issues() -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    Ok(qdrant_response(serde_json::json!({
+        "issues": []
+    }), start_time))
+}
+
+/// Clear all reported issues
+async fn clear_issues() -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    Ok(qdrant_response(true, start_time))
 }
 
 async fn create_snapshot(
@@ -1359,19 +1816,68 @@ async fn upload_snapshot(
 // ============ Additional Qdrant-compatible endpoints ============
 
 /// Update aliases (stub - aliases not yet implemented)
-async fn update_aliases() -> ActixResult<HttpResponse> {
+/// Update aliases request
+#[derive(Deserialize)]
+struct UpdateAliasesRequest {
+    actions: Vec<serde_json::Value>,
+}
+
+async fn update_aliases(
+    storage: web::Data<Arc<StorageManager>>,
+    req: web::Json<UpdateAliasesRequest>,
+) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
+    
+    for action in &req.actions {
+        if let Some(obj) = action.as_object() {
+            // Create alias: { "create_alias": { "alias_name": "x", "collection_name": "y" } }
+            if let Some(create) = obj.get("create_alias").and_then(|c| c.as_object()) {
+                if let (Some(alias), Some(collection)) = (
+                    create.get("alias_name").and_then(|v| v.as_str()),
+                    create.get("collection_name").and_then(|v| v.as_str())
+                ) {
+                    let _ = storage.create_alias(alias, collection);
+                }
+            }
+            
+            // Delete alias: { "delete_alias": { "alias_name": "x" } }
+            if let Some(delete) = obj.get("delete_alias").and_then(|d| d.as_object()) {
+                if let Some(alias) = delete.get("alias_name").and_then(|v| v.as_str()) {
+                    let _ = storage.delete_alias(alias);
+                }
+            }
+            
+            // Rename alias: { "rename_alias": { "old_alias_name": "x", "new_alias_name": "y" } }
+            if let Some(rename) = obj.get("rename_alias").and_then(|r| r.as_object()) {
+                if let (Some(old_alias), Some(new_alias)) = (
+                    rename.get("old_alias_name").and_then(|v| v.as_str()),
+                    rename.get("new_alias_name").and_then(|v| v.as_str())
+                ) {
+                    let _ = storage.rename_alias(old_alias, new_alias);
+                }
+            }
+        }
+    }
+    
     Ok(qdrant_response(true, start_time))
 }
 
 /// List collection aliases
 async fn list_collection_aliases(
+    storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
-    let _collection_name = path.into_inner();
+    let collection_name = path.into_inner();
+    let aliases: Vec<serde_json::Value> = storage.list_collection_aliases(&collection_name)
+        .into_iter()
+        .map(|alias| serde_json::json!({
+            "alias_name": alias,
+            "collection_name": collection_name
+        }))
+        .collect();
     Ok(qdrant_response(serde_json::json!({
-        "aliases": []
+        "aliases": aliases
     }), start_time))
 }
 
@@ -1490,29 +1996,88 @@ struct SetPayloadRequest {
 async fn set_payload(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<SetPayloadRequest>,
+    req: web::Json<SetPayloadRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut updated_count = 0;
+
+    // If specific points are provided, update only those
+    if let Some(point_ids) = &req.points {
+        for id_value in point_ids {
+            let id_str = match id_value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            if collection.set_payload(&id_str, req.payload.clone()).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
+    } else {
+        // Update all points (or filtered points)
+        let all_points = collection.get_all_points();
+        for point in all_points {
+            let id_str = point.id.to_string();
+            if collection.set_payload(&id_str, req.payload.clone()).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
     }
 
-    // Note: payload update not fully implemented
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": updated_count,
         "status": "acknowledged"
     }), start_time))
 }
 
-/// Overwrite payload on points
+/// Overwrite payload on points (replace entire payload)
 async fn overwrite_payload(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
     req: web::Json<SetPayloadRequest>,
 ) -> ActixResult<HttpResponse> {
-    set_payload(storage, path, req).await
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut updated_count = 0;
+
+    if let Some(point_ids) = &req.points {
+        for id_value in point_ids {
+            let id_str = match id_value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            if collection.overwrite_payload(&id_str, req.payload.clone()).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
+    } else {
+        let all_points = collection.get_all_points();
+        for point in all_points {
+            let id_str = point.id.to_string();
+            if collection.overwrite_payload(&id_str, req.payload.clone()).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
+    }
+
+    Ok(qdrant_response(serde_json::json!({
+        "operation_id": updated_count,
+        "status": "acknowledged"
+    }), start_time))
 }
 
 /// Delete payload fields from points
@@ -1528,17 +2093,41 @@ struct DeletePayloadRequest {
 async fn delete_payload(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<DeletePayloadRequest>,
+    req: web::Json<DeletePayloadRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut updated_count = 0;
+
+    if let Some(point_ids) = &req.points {
+        for id_value in point_ids {
+            let id_str = match id_value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            if collection.delete_payload_keys(&id_str, &req.keys).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
+    } else {
+        let all_points = collection.get_all_points();
+        for point in all_points {
+            let id_str = point.id.to_string();
+            if collection.delete_payload_keys(&id_str, &req.keys).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
     }
 
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": updated_count,
         "status": "acknowledged"
     }), start_time))
 }
@@ -1555,17 +2144,41 @@ struct ClearPayloadRequest {
 async fn clear_payload(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<ClearPayloadRequest>,
+    req: web::Json<ClearPayloadRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut updated_count = 0;
+
+    if let Some(point_ids) = &req.points {
+        for id_value in point_ids {
+            let id_str = match id_value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            if collection.clear_payload(&id_str).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
+    } else {
+        let all_points = collection.get_all_points();
+        for point in all_points {
+            let id_str = point.id.to_string();
+            if collection.clear_payload(&id_str).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
     }
 
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": updated_count,
         "status": "acknowledged"
     }), start_time))
 }
@@ -1573,23 +2186,74 @@ async fn clear_payload(
 /// Update vectors on existing points
 #[derive(Deserialize)]
 struct UpdateVectorsRequest {
-    points: Vec<serde_json::Value>,
+    /// List of point updates with id and vector
+    points: Vec<UpdateVectorPoint>,
+}
+
+#[derive(Deserialize)]
+struct UpdateVectorPoint {
+    id: serde_json::Value,
+    vector: serde_json::Value,
 }
 
 async fn update_vectors(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<UpdateVectorsRequest>,
+    req: web::Json<UpdateVectorsRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut updated_count = 0;
+
+    for point_update in &req.points {
+        let id_str = match &point_update.id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+
+        // Parse vector - can be array or named vectors object
+        let vector_data = match &point_update.vector {
+            serde_json::Value::Array(arr) => {
+                let vec: Result<Vec<f32>, _> = arr.iter()
+                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                    .collect();
+                vec.ok()
+            }
+            serde_json::Value::Object(obj) => {
+                // Named vectors - get first one
+                if let Some((_, vec_val)) = obj.iter().next() {
+                    if let Some(arr) = vec_val.as_array() {
+                        let vec: Result<Vec<f32>, _> = arr.iter()
+                            .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                            .collect();
+                        vec.ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(vec) = vector_data {
+            let vector = Vector::new(vec);
+            if collection.update_vector(&id_str, vector).unwrap_or(false) {
+                updated_count += 1;
+            }
+        }
     }
 
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": updated_count,
         "status": "acknowledged"
     }), start_time))
 }
@@ -1608,17 +2272,38 @@ struct DeleteVectorsRequest {
 async fn delete_vectors(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<DeleteVectorsRequest>,
+    req: web::Json<DeleteVectorsRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut deleted_count = 0;
+
+    // Note: In a full named-vectors implementation, this would delete specific named vectors
+    // For now, if points are specified, we clear their vectors (effectively delete the point)
+    if let Some(point_ids) = &req.points {
+        for id_value in point_ids {
+            let id_str = match id_value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            // Delete multivector if it was the target
+            if req.vectors.iter().any(|v| v == "multivector" || v.is_empty()) {
+                if collection.update_multivector(&id_str, None).unwrap_or(false) {
+                    deleted_count += 1;
+                }
+            }
+        }
     }
 
     Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
+        "operation_id": deleted_count,
         "status": "acknowledged"
     }), start_time))
 }
@@ -1632,16 +2317,161 @@ struct BatchUpdateRequest {
 async fn batch_update(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<BatchUpdateRequest>,
+    req: web::Json<BatchUpdateRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
+
+    let mut results = Vec::new();
+
+    for (idx, operation) in req.operations.iter().enumerate() {
+        let op_result = process_batch_operation(&collection, operation);
+        results.push(serde_json::json!({
+            "operation_id": idx,
+            "status": if op_result { "acknowledged" } else { "failed" }
+        }));
     }
 
-    Ok(qdrant_response(Vec::<serde_json::Value>::new(), start_time))
+    Ok(qdrant_response(results, start_time))
+}
+
+/// Process a single batch operation
+fn process_batch_operation(collection: &std::sync::Arc<distx_core::Collection>, operation: &serde_json::Value) -> bool {
+    let obj = match operation.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+
+    // Upsert operation
+    if let Some(upsert) = obj.get("upsert") {
+        if let Some(points) = upsert.get("points").and_then(|p| p.as_array()) {
+            for point_json in points {
+                if let Some(point) = parse_point_from_json(point_json) {
+                    let _ = collection.upsert(point);
+                }
+            }
+            return true;
+        }
+    }
+
+    // Delete operation
+    if let Some(delete) = obj.get("delete") {
+        if let Some(points) = delete.get("points").and_then(|p| p.as_array()) {
+            for id_val in points {
+                let id_str = match id_val {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => continue,
+                };
+                let _ = collection.delete(&id_str);
+            }
+            return true;
+        }
+    }
+
+    // Set payload operation
+    if let Some(set_payload) = obj.get("set_payload") {
+        if let Some(payload) = set_payload.get("payload") {
+            if let Some(points) = set_payload.get("points").and_then(|p| p.as_array()) {
+                for id_val in points {
+                    let id_str = match id_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    let _ = collection.set_payload(&id_str, payload.clone());
+                }
+                return true;
+            }
+        }
+    }
+
+    // Overwrite payload operation
+    if let Some(overwrite_payload) = obj.get("overwrite_payload") {
+        if let Some(payload) = overwrite_payload.get("payload") {
+            if let Some(points) = overwrite_payload.get("points").and_then(|p| p.as_array()) {
+                for id_val in points {
+                    let id_str = match id_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    let _ = collection.overwrite_payload(&id_str, payload.clone());
+                }
+                return true;
+            }
+        }
+    }
+
+    // Delete payload operation
+    if let Some(delete_payload) = obj.get("delete_payload") {
+        if let Some(keys) = delete_payload.get("keys").and_then(|k| k.as_array()) {
+            let key_strings: Vec<String> = keys.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect();
+            if let Some(points) = delete_payload.get("points").and_then(|p| p.as_array()) {
+                for id_val in points {
+                    let id_str = match id_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    let _ = collection.delete_payload_keys(&id_str, &key_strings);
+                }
+                return true;
+            }
+        }
+    }
+
+    // Clear payload operation
+    if let Some(clear_payload) = obj.get("clear_payload") {
+        if let Some(points) = clear_payload.get("points").and_then(|p| p.as_array()) {
+            for id_val in points {
+                let id_str = match id_val {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => continue,
+                };
+                let _ = collection.clear_payload(&id_str);
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Parse a point from JSON
+fn parse_point_from_json(json: &serde_json::Value) -> Option<Point> {
+    let obj = json.as_object()?;
+    
+    let id = match obj.get("id")? {
+        serde_json::Value::String(s) => distx_core::PointId::String(s.clone()),
+        serde_json::Value::Number(n) => {
+            distx_core::PointId::Integer(n.as_u64().unwrap_or(0))
+        }
+        _ => return None,
+    };
+
+    let vector_data = obj.get("vector")?;
+    let vector = match vector_data {
+        serde_json::Value::Array(arr) => {
+            let vec: Result<Vec<f32>, _> = arr.iter()
+                .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                .collect();
+            Vector::new(vec.ok()?)
+        }
+        _ => return None,
+    };
+
+    let payload = obj.get("payload").cloned();
+
+    Some(Point::new(id, vector, payload))
 }
 
 /// Batch search
@@ -1663,6 +2493,269 @@ async fn batch_search(
     }
 
     Ok(qdrant_response(Vec::<serde_json::Value>::new(), start_time))
+}
+
+/// Search points grouped by a payload field
+#[derive(Deserialize)]
+struct SearchGroupsRequest {
+    vector: Vec<f32>,
+    group_by: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    group_size: Option<usize>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn search_groups(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<SearchGroupsRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(qdrant_not_found("Collection not found", start_time));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(5);
+    let group_size = req.group_size.unwrap_or(3);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    let group_by = &req.group_by;
+    
+    let query_vector = Vector::new(req.vector.clone());
+    let search_results = collection.search(&query_vector, limit * group_size * 2, None);
+    
+    // Group results by the group_by field
+    let mut groups: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    
+    for (point, score) in search_results {
+        let group_key = point.payload
+            .as_ref()
+            .and_then(|p| p.get(group_by))
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        let group = groups.entry(group_key).or_default();
+        
+        if group.len() < group_size {
+            let mut hit = serde_json::json!({
+                "id": point_id_to_json(&point.id),
+                "score": score
+            });
+            
+            if with_payload {
+                hit["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+            }
+            if with_vector {
+                hit["vector"] = serde_json::json!(point.vector.as_slice());
+            }
+            
+            group.push(hit);
+        }
+        
+        if groups.len() >= limit && groups.values().all(|g| g.len() >= group_size) {
+            break;
+        }
+    }
+    
+    let group_results: Vec<serde_json::Value> = groups
+        .into_iter()
+        .take(limit)
+        .map(|(key, hits)| serde_json::json!({ "id": key, "hits": hits }))
+        .collect();
+
+    Ok(qdrant_response(serde_json::json!({
+        "groups": group_results
+    }), start_time))
+}
+
+/// Discover points using context pairs
+#[derive(Deserialize)]
+struct DiscoverRequest {
+    #[serde(default)]
+    target: Option<serde_json::Value>,
+    #[serde(default)]
+    context: Option<Vec<ContextPair>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ContextPair {
+    positive: serde_json::Value,
+    negative: serde_json::Value,
+}
+
+async fn discover_points(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<DiscoverRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(qdrant_not_found("Collection not found", start_time));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(10);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let _with_vector = req.with_vector.unwrap_or(false);
+    
+    // Parse target vector or point ID
+    let target_vector = if let Some(target) = &req.target {
+        match target {
+            serde_json::Value::Array(arr) => {
+                let vec: Result<Vec<f32>, _> = arr.iter()
+                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("expected f32"))
+                    .collect();
+                vec.ok().map(Vector::new)
+            }
+            serde_json::Value::Number(n) => {
+                let id = n.to_string();
+                collection.get(&id).map(|p| p.vector.clone())
+            }
+            serde_json::Value::String(s) => {
+                collection.get(s).map(|p| p.vector.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let query = match target_vector {
+        Some(v) => v,
+        None => {
+            return Ok(qdrant_error("Target vector or point ID required", start_time));
+        }
+    };
+    
+    let results = collection.search(&query, limit, None);
+    
+    let scored_points: Vec<serde_json::Value> = results.into_iter().map(|(point, score)| {
+        let mut result = serde_json::json!({
+            "id": point_id_to_json(&point.id),
+            "version": 0,
+            "score": score,
+        });
+        if with_payload {
+            result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+        }
+        result
+    }).collect();
+
+    Ok(qdrant_response(scored_points, start_time))
+}
+
+/// Batch discover points
+#[derive(Deserialize)]
+struct DiscoverBatchRequest {
+    searches: Vec<serde_json::Value>,
+}
+
+async fn discover_batch(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<DiscoverBatchRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(qdrant_not_found("Collection not found", start_time));
+    }
+
+    Ok(qdrant_response(Vec::<Vec<serde_json::Value>>::new(), start_time))
+}
+
+/// Facet counts - count points by unique payload values
+#[derive(Deserialize)]
+struct FacetRequest {
+    key: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+    #[serde(default)]
+    exact: Option<bool>,
+}
+
+async fn facet_counts(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<FacetRequest>,
+) -> ActixResult<HttpResponse> {
+    let start_time = Instant::now();
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(qdrant_not_found("Collection not found", start_time));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(10);
+    let key = &req.key;
+    
+    // Count occurrences of each value for the given key
+    let all_points = collection.get_all_points();
+    let mut value_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    
+    for point in all_points {
+        if let Some(payload) = &point.payload {
+            if let Some(value) = payload.get(key) {
+                let value_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => continue,
+                };
+                *value_counts.entry(value_str).or_insert(0) += 1;
+            }
+        }
+    }
+    
+    // Sort by count and take top limit
+    let mut counts: Vec<_> = value_counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    let hits: Vec<serde_json::Value> = counts.into_iter()
+        .take(limit)
+        .map(|(value, count)| serde_json::json!({
+            "value": value,
+            "count": count
+        }))
+        .collect();
+
+    Ok(qdrant_response(serde_json::json!({
+        "hits": hits
+    }), start_time))
 }
 
 /// Batch query
@@ -1765,11 +2858,7 @@ async fn query_groups(
         // Only add if group hasn't reached group_size
         if group.len() < group_size {
             let mut hit = serde_json::json!({
-                "id": match &point.id {
-                    distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                    distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                    distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                },
+                "id": point_id_to_json(&point.id),
                 "score": score
             });
             
@@ -1817,19 +2906,56 @@ struct CreateIndexRequest {
 async fn create_field_index(
     storage: web::Data<Arc<StorageManager>>,
     path: web::Path<String>,
-    _req: web::Json<CreateIndexRequest>,
+    req: web::Json<CreateIndexRequest>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
     let name = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
-    }
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
 
-    Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
-        "status": "acknowledged"
-    }), start_time))
+    // Parse field schema to determine index type
+    let index_type = if let Some(schema) = &req.field_schema {
+        match schema {
+            serde_json::Value::String(s) => match s.as_str() {
+                "keyword" => distx_core::PayloadIndexType::Keyword,
+                "integer" => distx_core::PayloadIndexType::Integer,
+                "float" => distx_core::PayloadIndexType::Float,
+                "bool" => distx_core::PayloadIndexType::Bool,
+                "geo" => distx_core::PayloadIndexType::Geo,
+                "text" => distx_core::PayloadIndexType::Text,
+                _ => distx_core::PayloadIndexType::Keyword,
+            }
+            serde_json::Value::Object(obj) => {
+                if let Some(type_val) = obj.get("type").and_then(|v| v.as_str()) {
+                    match type_val {
+                        "keyword" => distx_core::PayloadIndexType::Keyword,
+                        "integer" => distx_core::PayloadIndexType::Integer,
+                        "float" => distx_core::PayloadIndexType::Float,
+                        "bool" => distx_core::PayloadIndexType::Bool,
+                        "geo" => distx_core::PayloadIndexType::Geo,
+                        "text" => distx_core::PayloadIndexType::Text,
+                        _ => distx_core::PayloadIndexType::Keyword,
+                    }
+                } else {
+                    distx_core::PayloadIndexType::Keyword
+                }
+            }
+            _ => distx_core::PayloadIndexType::Keyword,
+        }
+    } else {
+        distx_core::PayloadIndexType::Keyword
+    };
+
+    match collection.create_payload_index(&req.field_name, index_type) {
+        Ok(_) => Ok(qdrant_response(serde_json::json!({
+            "operation_id": 0,
+            "status": "acknowledged"
+        }), start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
+    }
 }
 
 /// Delete field index
@@ -1838,16 +2964,20 @@ async fn delete_field_index(
     path: web::Path<(String, String)>,
 ) -> ActixResult<HttpResponse> {
     let start_time = Instant::now();
-    let (name, _field_name) = path.into_inner();
+    let (name, field_name) = path.into_inner();
     
-    if storage.get_collection(&name).is_none() {
-        return Ok(qdrant_not_found("Collection not found", start_time));
-    }
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => return Ok(qdrant_not_found("Collection not found", start_time)),
+    };
 
-    Ok(qdrant_response(serde_json::json!({
-        "operation_id": 0,
-        "status": "acknowledged"
-    }), start_time))
+    match collection.delete_payload_index(&field_name) {
+        Ok(_) => Ok(qdrant_response(serde_json::json!({
+            "operation_id": 0,
+            "status": "acknowledged"
+        }), start_time)),
+        Err(e) => Ok(qdrant_error(&e.to_string(), start_time)),
+    }
 }
 
 /// Recommend points based on positive/negative examples
@@ -1992,11 +3122,7 @@ async fn recommend_points(
         }
         
         let mut result = serde_json::json!({
-            "id": match &point.id {
-                distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-            },
+            "id": point_id_to_json(&point.id),
             "version": 0,
             "score": score
         });

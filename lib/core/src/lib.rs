@@ -54,7 +54,7 @@ pub mod multivector;
 /// - NEON on ARM64/Apple Silicon
 pub mod simd;
 
-pub use collection::{Collection, CollectionConfig, Distance};
+pub use collection::{Collection, CollectionConfig, Distance, PayloadIndexType};
 pub use vector::Vector;
 pub use error::{Error, Result};
 pub use point::{Point, PointId, VectorData};
