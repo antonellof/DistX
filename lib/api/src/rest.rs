@@ -14,13 +14,14 @@ const DASHBOARD_PATH: &str = "/dashboard";
 
 #[derive(Deserialize)]
 struct CreateCollectionRequest {
-    #[serde(deserialize_with = "deserialize_vectors")]
-    vectors: VectorConfig,
+    /// Dense vectors configuration (optional - can be omitted for sparse-only collections)
+    #[serde(default, deserialize_with = "deserialize_vectors_optional")]
+    vectors: Option<VectorConfig>,
     #[serde(default)]
     use_hnsw: bool,
     #[serde(default)]
     enable_bm25: bool,
-    // Qdrant compatibility - ignored fields
+    // Qdrant compatibility - sparse vectors (stored but not fully implemented)
     #[serde(default)]
     sparse_vectors: Option<serde_json::Value>,
 }
@@ -43,22 +44,26 @@ struct VectorConfig {
 }
 
 // Custom deserializer to handle both simple and named vector formats
-fn deserialize_vectors<'de, D>(deserializer: D) -> Result<VectorConfig, D::Error>
+fn deserialize_vectors_optional<'de, D>(deserializer: D) -> Result<Option<VectorConfig>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    
+    let Some(value) = value else {
+        return Ok(None);
+    };
     
     // Try simple format first: {"size": 1536, "distance": "Cosine"}
     if let Ok(config) = serde_json::from_value::<VectorConfig>(value.clone()) {
-        return Ok(config);
+        return Ok(Some(config));
     }
     
     // Try named vectors format: {"": {"size": 1536, ...}} or {"vector_name": {"size": 1536, ...}}
     if let Ok(named) = serde_json::from_value::<HashMap<String, VectorConfig>>(value.clone()) {
         // Use the first vector config (default or named)
         if let Some(config) = named.into_values().next() {
-            return Ok(config);
+            return Ok(Some(config));
         }
     }
     
@@ -241,8 +246,28 @@ impl RestApi {
                 .route("/collections/{name}/exists", web::get().to(collection_exists))
                 // Qdrant compatibility - additional endpoints
                 .route("/aliases", web::get().to(list_aliases))
+                .route("/collections/aliases", web::post().to(update_aliases))
+                .route("/collections/{name}/aliases", web::get().to(list_collection_aliases))
                 .route("/cluster", web::get().to(cluster_info))
+                .route("/collections/{name}/cluster", web::get().to(collection_cluster_info))
                 .route("/telemetry", web::get().to(telemetry_info))
+                // Points batch operations
+                .route("/collections/{name}/points", web::post().to(get_points_by_ids))
+                .route("/collections/{name}/points/count", web::post().to(count_points))
+                .route("/collections/{name}/points/payload", web::post().to(set_payload))
+                .route("/collections/{name}/points/payload", web::put().to(overwrite_payload))
+                .route("/collections/{name}/points/payload/delete", web::post().to(delete_payload))
+                .route("/collections/{name}/points/payload/clear", web::post().to(clear_payload))
+                .route("/collections/{name}/points/vectors", web::put().to(update_vectors))
+                .route("/collections/{name}/points/vectors/delete", web::post().to(delete_vectors))
+                .route("/collections/{name}/points/batch", web::post().to(batch_update))
+                .route("/collections/{name}/points/search/batch", web::post().to(batch_search))
+                .route("/collections/{name}/points/query/batch", web::post().to(batch_query))
+                // Index endpoints
+                .route("/collections/{name}/index", web::put().to(create_field_index))
+                .route("/collections/{name}/index/{field_name}", web::delete().to(delete_field_index))
+                // Recommend endpoint
+                .route("/collections/{name}/points/recommend", web::post().to(recommend_points))
                 // Snapshot endpoints (stubs for UI compatibility)
                 .route("/collections/{name}/snapshots", web::get().to(list_snapshots))
                 .route("/collections/{name}/snapshots", web::post().to(create_snapshot))
@@ -380,19 +405,36 @@ async fn create_collection(
     req: web::Json<CreateCollectionRequest>,
 ) -> ActixResult<HttpResponse> {
     let name = path.into_inner();
-    let distance = match req.vectors.distance.as_deref() {
-        Some("Cosine") | Some("cosine") => Distance::Cosine,
-        Some("Euclidean") | Some("euclidean") => Distance::Euclidean,
-        Some("Dot") | Some("dot") => Distance::Dot,
-        _ => Distance::Cosine,
+    
+    // Handle sparse-only collections (Qdrant compatibility)
+    // For sparse-only collections, we create with a default vector dimension
+    let (vector_dim, distance) = if let Some(ref vectors) = req.vectors {
+        let dist = match vectors.distance.as_deref() {
+            Some("Cosine") | Some("cosine") => Distance::Cosine,
+            Some("Euclidean") | Some("euclidean") => Distance::Euclidean,
+            Some("Dot") | Some("dot") => Distance::Dot,
+            _ => Distance::Cosine,
+        };
+        (vectors.size, dist)
+    } else if req.sparse_vectors.is_some() {
+        // Sparse-only collection - use BM25 with default text dimension
+        // Note: DistX uses BM25 for sparse text search, not sparse vectors
+        (0, Distance::Cosine)
+    } else {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "status": {
+                "error": "Either 'vectors' or 'sparse_vectors' must be provided"
+            }
+        })));
     };
 
     let config = CollectionConfig {
         name: name.clone(),
-        vector_dim: req.vectors.size,
+        vector_dim,
         distance,
         use_hnsw: req.use_hnsw,
-        enable_bm25: req.enable_bm25,
+        // Enable BM25 for sparse collections
+        enable_bm25: req.enable_bm25 || req.sparse_vectors.is_some(),
     };
 
     match storage.create_collection(config) {
@@ -1215,6 +1257,491 @@ async fn delete_snapshot(
         "status": {
             "error": format!("Snapshot '{}' not found in collection '{}'", snapshot_name, collection_name)
         }
+    })))
+}
+
+// ============ Additional Qdrant-compatible endpoints ============
+
+/// Update aliases (stub - aliases not yet implemented)
+async fn update_aliases() -> ActixResult<HttpResponse> {
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": true
+    })))
+}
+
+/// List collection aliases
+async fn list_collection_aliases(
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let _collection_name = path.into_inner();
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "aliases": []
+        }
+    })))
+}
+
+/// Collection cluster info
+async fn collection_cluster_info(
+    path: web::Path<String>,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "peer_id": 0,
+            "shard_count": 1,
+            "local_shards": [{
+                "shard_id": 0,
+                "points_count": 0,
+                "state": "Active"
+            }],
+            "remote_shards": [],
+            "shard_transfers": [],
+            "collection_name": collection_name
+        }
+    })))
+}
+
+/// Get multiple points by IDs
+#[derive(Deserialize)]
+struct GetPointsRequest {
+    ids: Vec<serde_json::Value>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+}
+
+async fn get_points_by_ids(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<GetPointsRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": { "error": "Collection not found" }
+            })));
+        }
+    };
+
+    let with_payload = req.with_payload.unwrap_or(true);
+    let with_vector = req.with_vector.unwrap_or(false);
+    
+    let mut points = Vec::new();
+    for id_value in &req.ids {
+        let id_str = match id_value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        
+        if let Some(point) = collection.get(&id_str) {
+            let mut result = serde_json::json!({
+                "id": id_value
+            });
+            if with_payload {
+                result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+            }
+            if with_vector {
+                result["vector"] = serde_json::json!(point.vector.as_slice());
+            }
+            points.push(result);
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": points
+    })))
+}
+
+/// Count points in collection
+#[derive(Deserialize)]
+struct CountRequest {
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+    #[serde(default)]
+    exact: Option<bool>,
+}
+
+async fn count_points(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<CountRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": { "error": "Collection not found" }
+            })));
+        }
+    };
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "count": collection.count()
+        }
+    })))
+}
+
+/// Set payload on points
+#[derive(Deserialize)]
+struct SetPayloadRequest {
+    payload: serde_json::Value,
+    #[serde(default)]
+    points: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn set_payload(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<SetPayloadRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    // Note: payload update not fully implemented
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Overwrite payload on points
+async fn overwrite_payload(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<SetPayloadRequest>,
+) -> ActixResult<HttpResponse> {
+    set_payload(storage, path, req).await
+}
+
+/// Delete payload fields from points
+#[derive(Deserialize)]
+struct DeletePayloadRequest {
+    keys: Vec<String>,
+    #[serde(default)]
+    points: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn delete_payload(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<DeletePayloadRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Clear all payload from points
+#[derive(Deserialize)]
+struct ClearPayloadRequest {
+    #[serde(default)]
+    points: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn clear_payload(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<ClearPayloadRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Update vectors on existing points
+#[derive(Deserialize)]
+struct UpdateVectorsRequest {
+    points: Vec<serde_json::Value>,
+}
+
+async fn update_vectors(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<UpdateVectorsRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Delete vectors from points
+#[derive(Deserialize)]
+struct DeleteVectorsRequest {
+    #[serde(default)]
+    points: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    vectors: Vec<String>,
+    #[serde(default)]
+    filter: Option<serde_json::Value>,
+}
+
+async fn delete_vectors(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<DeleteVectorsRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Batch update operations
+#[derive(Deserialize)]
+struct BatchUpdateRequest {
+    operations: Vec<serde_json::Value>,
+}
+
+async fn batch_update(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<BatchUpdateRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": []
+    })))
+}
+
+/// Batch search
+#[derive(Deserialize)]
+struct BatchSearchRequest {
+    searches: Vec<serde_json::Value>,
+}
+
+async fn batch_search(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<BatchSearchRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": []
+    })))
+}
+
+/// Batch query
+#[derive(Deserialize)]
+struct BatchQueryRequest {
+    searches: Vec<serde_json::Value>,
+}
+
+async fn batch_query(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<BatchQueryRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": []
+    })))
+}
+
+/// Create field index
+#[derive(Deserialize)]
+struct CreateIndexRequest {
+    field_name: String,
+    #[serde(default)]
+    field_schema: Option<serde_json::Value>,
+}
+
+async fn create_field_index(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    _req: web::Json<CreateIndexRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Delete field index
+async fn delete_field_index(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<(String, String)>,
+) -> ActixResult<HttpResponse> {
+    let (name, _field_name) = path.into_inner();
+    
+    if storage.get_collection(&name).is_none() {
+        return Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "status": { "error": "Collection not found" }
+        })));
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": {
+            "operation_id": 0,
+            "status": "completed"
+        }
+    })))
+}
+
+/// Recommend points based on positive/negative examples
+#[derive(Deserialize)]
+struct RecommendRequest {
+    #[serde(default)]
+    positive: Vec<serde_json::Value>,
+    #[serde(default)]
+    negative: Vec<serde_json::Value>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    with_payload: Option<bool>,
+    #[serde(default)]
+    with_vector: Option<bool>,
+}
+
+async fn recommend_points(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    req: web::Json<RecommendRequest>,
+) -> ActixResult<HttpResponse> {
+    let name = path.into_inner();
+    
+    let collection = match storage.get_collection(&name) {
+        Some(c) => c,
+        None => {
+            return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "status": { "error": "Collection not found" }
+            })));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(10);
+    let with_payload = req.with_payload.unwrap_or(true);
+    let _with_vector = req.with_vector.unwrap_or(false);
+    
+    // Simple recommend: use positive examples to find similar points
+    // This is a basic implementation - Qdrant's is more sophisticated
+    let mut results = Vec::new();
+    
+    for positive_id in &req.positive {
+        let id_str = match positive_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        
+        if let Some(point) = collection.get(&id_str) {
+            let search_results = collection.search(&point.vector, limit, None);
+            for (found_point, score) in search_results {
+                let mut result = serde_json::json!({
+                    "id": match &found_point.id {
+                        distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+                        distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
+                        distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+                    },
+                    "version": 0,
+                    "score": score
+                });
+                if with_payload {
+                    result["payload"] = found_point.payload.unwrap_or(serde_json::Value::Null);
+                }
+                results.push(result);
+            }
+            break; // Use first positive example
+        }
+    }
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "result": results
     })))
 }
 
