@@ -1,4 +1,4 @@
-use crate::{Error, Point, Result, Vector, HnswIndex, BM25Index, Filter};
+use crate::{Error, Point, Result, Vector, HnswIndex, BM25Index, Filter, MultiVector};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -369,6 +369,61 @@ impl Collection {
         } else {
             Vec::new()
         }
+    }
+    
+    /// Search using multivector MaxSim scoring (ColBERT-style)
+    /// 
+    /// For each sub-vector in the query, finds the maximum similarity 
+    /// with any sub-vector in each document, then sums all maximums.
+    pub fn search_multivector(
+        &self,
+        query: &MultiVector,
+        limit: usize,
+        filter: Option<&dyn Filter>,
+    ) -> Vec<(Point, f32)> {
+        let points = self.points.read();
+        
+        let mut results: Vec<(Point, f32)> = Vec::with_capacity(points.len().min(limit * 2));
+        
+        for point in points.values() {
+            if let Some(f) = filter {
+                if !f.matches(point) {
+                    continue;
+                }
+            }
+            
+            // Calculate MaxSim score
+            let score = if let Some(doc_mv) = &point.multivector {
+                // Both query and document have multivectors - use MaxSim
+                match self.config.distance {
+                    Distance::Cosine => query.max_sim_cosine(doc_mv),
+                    Distance::Euclidean => query.max_sim_l2(doc_mv),
+                    Distance::Dot => query.max_sim(doc_mv),
+                }
+            } else {
+                // Document has single vector - wrap it as multivector
+                let doc_mv = MultiVector::from_single(point.vector.as_slice().to_vec())
+                    .unwrap_or_else(|_| MultiVector::new(vec![vec![0.0; query.dim()]]).unwrap());
+                match self.config.distance {
+                    Distance::Cosine => query.max_sim_cosine(&doc_mv),
+                    Distance::Euclidean => query.max_sim_l2(&doc_mv),
+                    Distance::Dot => query.max_sim(&doc_mv),
+                }
+            };
+            
+            results.push((point.clone(), score));
+        }
+        
+        // Sort by score descending
+        if results.len() > limit {
+            results.select_nth_unstable_by(limit, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(limit);
+        }
+        
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
     }
 
     /// Get all points

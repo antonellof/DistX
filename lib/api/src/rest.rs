@@ -1,7 +1,7 @@
 use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
 use actix_cors::Cors;
 use actix_files::Files;
-use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter};
+use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
@@ -86,11 +86,99 @@ struct UpsertPointsRequest {
     points: Vec<PointRequest>,
 }
 
+/// Parsed vector data - can be single or multi
+struct ParsedVector {
+    /// First/primary vector (for backwards compatibility)
+    primary: Vec<f32>,
+    /// Full multivector data if this was a multivector input
+    multivector: Option<Vec<Vec<f32>>>,
+}
+
 #[derive(Deserialize)]
 struct PointRequest {
     id: serde_json::Value,
-    vector: Vec<f32>,
+    #[serde(deserialize_with = "deserialize_vector")]
+    vector: ParsedVector,
     payload: Option<serde_json::Value>,
+}
+
+// Custom deserializer to handle multiple vector formats (Qdrant compatibility)
+// Simple: [0.1, 0.2, 0.3]
+// Multivector: [[0.1, 0.2], [0.3, 0.4]] -> stores full multivector for MaxSim search
+// Named vectors: {"vector_name": [0.1, 0.2]} -> extracts the vector
+fn deserialize_vector<'de, D>(deserializer: D) -> Result<ParsedVector, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    
+    fn parse_simple_vector(arr: &[serde_json::Value]) -> Result<Vec<f32>, String> {
+        arr.iter()
+            .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "expected f32".to_string()))
+            .collect()
+    }
+    
+    fn parse_multivector(arr: &[serde_json::Value]) -> Result<Vec<Vec<f32>>, String> {
+        arr.iter()
+            .map(|sub| {
+                if let serde_json::Value::Array(sub_arr) = sub {
+                    parse_simple_vector(sub_arr)
+                } else {
+                    Err("expected array of arrays for multivector".to_string())
+                }
+            })
+            .collect()
+    }
+    
+    match &value {
+        // Array: could be simple vector or multivector
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr.first() {
+                // Simple vector: [0.1, 0.2, 0.3]
+                Some(serde_json::Value::Number(_)) => {
+                    let primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
+                    Ok(ParsedVector { primary, multivector: None })
+                }
+                // Multivector: [[0.1, 0.2], [0.3, 0.4]] - store full multivector
+                Some(serde_json::Value::Array(_)) => {
+                    let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
+                    let primary = multivec.first().cloned().unwrap_or_default();
+                    Ok(ParsedVector { primary, multivector: Some(multivec) })
+                }
+                _ => Err(serde::de::Error::custom("invalid vector format: expected number or array"))
+            }
+        }
+        // Empty array
+        serde_json::Value::Array(_) => {
+            Err(serde::de::Error::custom("vector cannot be empty"))
+        }
+        // Named vector: {"vector_name": [0.1, 0.2]} or {"": [...]}
+        serde_json::Value::Object(obj) => {
+            if let Some((_, vec_value)) = obj.iter().next() {
+                match vec_value {
+                    serde_json::Value::Array(arr) if !arr.is_empty() => {
+                        match arr.first() {
+                            Some(serde_json::Value::Number(_)) => {
+                                let primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
+                                Ok(ParsedVector { primary, multivector: None })
+                            }
+                            Some(serde_json::Value::Array(_)) => {
+                                // Named multivector
+                                let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
+                                let primary = multivec.first().cloned().unwrap_or_default();
+                                Ok(ParsedVector { primary, multivector: Some(multivec) })
+                            }
+                            _ => Err(serde::de::Error::custom("invalid named vector format"))
+                        }
+                    }
+                    _ => Err(serde::de::Error::custom("named vector value must be a non-empty array"))
+                }
+            } else {
+                Err(serde::de::Error::custom("empty named vector object"))
+            }
+        }
+        _ => Err(serde::de::Error::custom("vector must be an array or object")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -183,14 +271,14 @@ impl RestApi {
 async fn root_info() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "title": "DistX - Fast Vector Database",
-        "version": "0.2.0"
+        "version": "0.2.1"
     })))
 }
 
 async fn health_check() -> ActixResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "title": "DistX",
-        "version": "0.2.0"
+        "version": "0.2.1"
     })))
 }
 
@@ -372,8 +460,24 @@ async fn upsert_points(
             _ => return Err("Invalid point ID"),
         };
 
-        let vector = Vector::new(point_req.vector.clone());
-        Ok(Point::new(id, vector, point_req.payload.clone()))
+        // Create point with multivector support
+        let point = if let Some(ref multivec_data) = point_req.vector.multivector {
+            // Create MultiVector and Point with multivector
+            match MultiVector::new(multivec_data.clone()) {
+                Ok(mv) => Point::new_multi(id, mv, point_req.payload.clone()),
+                Err(_) => {
+                    // Fallback to primary vector if multivector creation fails
+                    let vector = Vector::new(point_req.vector.primary.clone());
+                    Point::new(id, vector, point_req.payload.clone())
+                }
+            }
+        } else {
+            // Simple dense vector
+            let vector = Vector::new(point_req.vector.primary.clone());
+            Point::new(id, vector, point_req.payload.clone())
+        };
+        
+        Ok(point)
     }).collect();
 
     match points {
@@ -649,8 +753,9 @@ async fn get_point(
     };
 
     match collection.get(&point_id) {
-        Some(point) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "result": {
+        Some(point) => {
+            // Build response with optional multivector
+            let mut result = serde_json::json!({
                 "id": match &point.id {
                     distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
                     distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
@@ -658,8 +763,15 @@ async fn get_point(
                 },
                 "vector": point.vector.as_slice(),
                 "payload": point.payload,
+            });
+            
+            // Add multivector if present
+            if let Some(mv) = &point.multivector {
+                result["multivector"] = serde_json::json!(mv.vectors());
             }
-        }))),
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "result": result })))
+        }
         None => Ok(HttpResponse::NotFound().json(serde_json::json!({
             "status": {
                 "error": "Point not found"
@@ -864,7 +976,7 @@ async fn telemetry_info() -> ActixResult<HttpResponse> {
             "id": "distx-single-node",
             "app": {
                 "name": "distx",
-                "version": "0.2.0"
+                "version": "0.2.1"
             }
         }
     })))
