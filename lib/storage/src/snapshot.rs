@@ -202,6 +202,18 @@ impl SnapshotManager {
         url: &str,
         expected_checksum: Option<&str>,
     ) -> Result<PathBuf> {
+        // Check if this is a Qdrant public snapshot URL
+        if url.contains("snapshots.qdrant.io") || url.contains("qdrant") && url.contains(".snapshot") {
+            return Err(anyhow!(
+                "Cannot restore from Qdrant snapshots directly. \
+                Qdrant snapshots use a different format (tar.gz archive). \
+                To import data from Qdrant, please:\n\
+                1. Export points using Qdrant's scroll API\n\
+                2. Import them into DistX using the upsert API\n\
+                Or use a migration script to transfer the data."
+            ));
+        }
+
         let collection_dir = self.collection_snapshot_dir(collection_name);
         fs::create_dir_all(&collection_dir)?;
 
@@ -249,10 +261,63 @@ impl SnapshotManager {
         let file = File::open(path)?;
         let mut decoder = GzDecoder::new(BufReader::new(file));
         let mut json_data = Vec::new();
-        decoder.read_to_end(&mut json_data)?;
+        
+        match decoder.read_to_end(&mut json_data) {
+            Ok(_) => {},
+            Err(e) => {
+                // Check if it might be a Qdrant tar.gz snapshot (not just gzipped JSON)
+                let file_bytes = fs::read(path)?;
+                if file_bytes.len() > 2 && file_bytes[0] == 0x1f && file_bytes[1] == 0x8b {
+                    // It's gzipped, but not JSON - likely a Qdrant tar.gz archive
+                    return Err(anyhow!(
+                        "This appears to be a Qdrant tar.gz snapshot archive. \
+                        DistX snapshots use a different format. \
+                        To migrate data from Qdrant, please use the REST API to export and import points."
+                    ));
+                }
+                return Err(anyhow!("Failed to decompress snapshot: {}", e));
+            }
+        }
 
-        let data: CollectionSnapshotData = serde_json::from_slice(&json_data)?;
-        Ok(data)
+        // Try to parse as JSON
+        match serde_json::from_slice::<CollectionSnapshotData>(&json_data) {
+            Ok(data) => Ok(data),
+            Err(e) => {
+                // Check if the decompressed data starts with typical tar header
+                if json_data.len() > 262 && &json_data[257..262] == b"ustar" {
+                    return Err(anyhow!(
+                        "This appears to be a Qdrant tar.gz snapshot archive. \
+                        DistX snapshots use a different format (gzipped JSON). \
+                        To migrate data from Qdrant, please use the REST API to export and import points."
+                    ));
+                }
+                Err(anyhow!("Failed to parse snapshot JSON: {}", e))
+            }
+        }
+    }
+
+    /// Save uploaded snapshot data to a file
+    pub fn save_uploaded_snapshot(
+        &self,
+        collection_name: &str,
+        data: &[u8],
+        filename: Option<&str>,
+    ) -> Result<PathBuf> {
+        let collection_dir = self.collection_snapshot_dir(collection_name);
+        fs::create_dir_all(&collection_dir)?;
+
+        // Use provided filename or generate one
+        let snapshot_name = filename
+            .filter(|f| f.ends_with(".snapshot"))
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| Self::generate_snapshot_name(collection_name));
+
+        let snapshot_path = collection_dir.join(&snapshot_name);
+
+        // Write the data directly to the file
+        fs::write(&snapshot_path, data)?;
+
+        Ok(snapshot_path)
     }
 
     /// List all snapshots across all collections

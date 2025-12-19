@@ -1,12 +1,14 @@
 use actix_web::{web, App, HttpServer, HttpResponse, Result as ActixResult};
 use actix_cors::Cors;
 use actix_files::Files;
+use actix_multipart::Multipart;
 use distx_core::{CollectionConfig, Distance, Point, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::path::Path;
 use std::collections::HashMap;
+use futures_util::StreamExt;
 
 // Dashboard configuration
 const STATIC_DIR: &str = "./static";
@@ -272,6 +274,7 @@ impl RestApi {
                 // Snapshot endpoints (stubs for UI compatibility)
                 .route("/collections/{name}/snapshots", web::get().to(list_snapshots))
                 .route("/collections/{name}/snapshots", web::post().to(create_snapshot))
+                .route("/collections/{name}/snapshots/upload", web::post().to(upload_snapshot))
                 .route("/collections/{name}/snapshots/recover", web::put().to(recover_snapshot))
                 .route("/collections/{name}/snapshots/{snapshot_name}", web::get().to(get_snapshot))
                 .route("/collections/{name}/snapshots/{snapshot_name}", web::delete().to(delete_snapshot))
@@ -1395,6 +1398,89 @@ async fn delete_snapshot(
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "status": {
                     "error": e.to_string()
+                }
+            })))
+        }
+    }
+}
+
+async fn upload_snapshot(
+    storage: web::Data<Arc<StorageManager>>,
+    path: web::Path<String>,
+    mut payload: Multipart,
+) -> ActixResult<HttpResponse> {
+    let collection_name = path.into_inner();
+    
+    let mut snapshot_data: Option<Vec<u8>> = None;
+    let mut filename: Option<String> = None;
+    
+    // Process multipart form data
+    while let Some(item) = payload.next().await {
+        let mut field = match item {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                    "status": {
+                        "error": format!("Failed to parse multipart: {}", e)
+                    }
+                })));
+            }
+        };
+        
+        let content_disposition = match field.content_disposition() {
+            Some(cd) => cd,
+            None => continue,
+        };
+        let field_name = content_disposition.get_name().unwrap_or("");
+        
+        if field_name == "snapshot" {
+            // Get filename
+            filename = content_disposition.get_filename().map(|s: &str| s.to_string());
+            
+            // Read file data
+            let mut data = Vec::new();
+            while let Some(chunk) = field.next().await {
+                match chunk {
+                    Ok(bytes) => data.extend_from_slice(&bytes),
+                    Err(e) => {
+                        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                            "status": {
+                                "error": format!("Failed to read file data: {}", e)
+                            }
+                        })));
+                    }
+                }
+            }
+            snapshot_data = Some(data);
+        }
+    }
+    
+    // Validate we got the snapshot file
+    let data = match snapshot_data {
+        Some(d) => d,
+        None => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                "status": {
+                    "error": "No snapshot file provided in multipart form"
+                }
+            })));
+        }
+    };
+    
+    // Save and restore the snapshot
+    match storage.upload_and_restore_snapshot(&collection_name, &data, filename.as_deref()) {
+        Ok(collection) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "result": {
+                    "collection": collection_name,
+                    "points_count": collection.count()
+                }
+            })))
+        }
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": {
+                    "error": format!("Failed to restore snapshot: {}", e)
                 }
             })))
         }

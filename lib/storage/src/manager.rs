@@ -266,9 +266,12 @@ impl StorageManager {
     }
 
     /// Restore a collection from snapshot data
-    fn restore_collection_from_data(&self, data: CollectionSnapshotData) -> Result<Arc<Collection>> {
+    /// If target_name is provided, uses that as the collection name; otherwise uses the name from the snapshot
+    fn restore_collection_from_data_with_name(&self, data: CollectionSnapshotData, target_name: Option<&str>) -> Result<Arc<Collection>> {
+        let collection_name = target_name.unwrap_or(&data.name).to_string();
+        
         let config = CollectionConfig {
-            name: data.name.clone(),
+            name: collection_name.clone(),
             vector_dim: data.config.vector_dim,
             distance: match data.config.distance.as_str() {
                 "Cosine" => Distance::Cosine,
@@ -283,7 +286,7 @@ impl StorageManager {
         // Remove existing collection if present
         {
             let mut collections = self.collections.write();
-            collections.remove(&data.name);
+            collections.remove(&collection_name);
         }
 
         // Create new collection
@@ -320,16 +323,39 @@ impl StorageManager {
         // Add to collections
         {
             let mut collections = self.collections.write();
-            collections.insert(data.name, collection.clone());
+            collections.insert(collection_name, collection.clone());
         }
 
         Ok(collection)
+    }
+
+    /// Restore a collection from snapshot data (uses original collection name from snapshot)
+    fn restore_collection_from_data(&self, data: CollectionSnapshotData) -> Result<Arc<Collection>> {
+        self.restore_collection_from_data_with_name(data, None)
     }
 
     /// List all snapshots
     pub fn list_all_snapshots(&self) -> Result<Vec<SnapshotDescription>> {
         self.snapshots.list_all_snapshots()
             .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Upload and restore a snapshot from raw bytes
+    pub fn upload_and_restore_snapshot(
+        &self, 
+        collection_name: &str, 
+        data: &[u8],
+        filename: Option<&str>,
+    ) -> Result<Arc<Collection>> {
+        // Save the uploaded data to a temporary snapshot file
+        let snapshot_path = self.snapshots.save_uploaded_snapshot(collection_name, data, filename)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        // Load and restore - use the target collection_name (not the name from the snapshot)
+        let snapshot_data = self.snapshots.load_snapshot_from_path(&snapshot_path)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        self.restore_collection_from_data_with_name(snapshot_data, Some(collection_name))
     }
 }
 
