@@ -704,8 +704,57 @@ async fn query_points(
         parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
     });
     
-    // Determine if query is multivector or single vector
+    // Determine query type: point ID, single vector, or multivector
     let results = match &req.query {
+        // Query by point ID (nearest to existing point)
+        serde_json::Value::Number(n) => {
+            let point_id_str = if let Some(id) = n.as_u64() {
+                id.to_string()
+            } else if let Some(id) = n.as_i64() {
+                id.to_string()
+            } else {
+                return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                    "status": { "error": "Invalid point ID format" }
+                })));
+            };
+            
+            // Get the point by ID and use its vector for search
+            if let Some(source_point) = collection.get(&point_id_str) {
+                let query_vector = source_point.vector.clone();
+                let mut search_results = if let Some(f) = filter.as_deref() {
+                    collection.search(&query_vector, limit + 1, Some(f))
+                } else {
+                    collection.search(&query_vector, limit + 1, None)
+                };
+                // Remove the source point from results
+                search_results.retain(|(p, _)| p.id.to_string() != point_id_str);
+                search_results.truncate(limit);
+                search_results
+            } else {
+                return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                    "status": { "error": format!("Point with ID '{}' not found", point_id_str) }
+                })));
+            }
+        }
+        // Query by string point ID
+        serde_json::Value::String(s) => {
+            if let Some(source_point) = collection.get(s) {
+                let query_vector = source_point.vector.clone();
+                let mut search_results = if let Some(f) = filter.as_deref() {
+                    collection.search(&query_vector, limit + 1, Some(f))
+                } else {
+                    collection.search(&query_vector, limit + 1, None)
+                };
+                // Remove the source point from results
+                search_results.retain(|(p, _)| p.id.to_string() != *s);
+                search_results.truncate(limit);
+                search_results
+            } else {
+                return Ok(HttpResponse::NotFound().json(serde_json::json!({
+                    "status": { "error": format!("Point with ID '{}' not found", s) }
+                })));
+            }
+        }
         serde_json::Value::Array(arr) if !arr.is_empty() => {
             match arr.first() {
                 // Multivector: [[0.1, 0.2], [0.3, 0.4]]
@@ -779,7 +828,7 @@ async fn query_points(
         }
         _ => {
             return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "status": { "error": "Query must be a vector array" }
+                "status": { "error": "Query must be a vector array or point ID" }
             })));
         }
     };
