@@ -147,7 +147,7 @@ curl -X POST http://localhost:6333/collections/my_collection/points/search \
 - **Text Search**: BM25 full-text search with ranking
 - **Payload Filtering**: Filter results by JSON metadata
 - **Dual API**: REST (Qdrant-compatible) and gRPC
-- **Web Dashboard**: Built-in UI for visual management
+- **Web Dashboard**: Uses Qdrant's fully compatible dashboard UI
 - **Docker Ready**: Single command deployment
 - **Persistence**: Redis-style snapshots, WAL, and LMDB storage
 - **Lightweight**: Single ~6MB binary
@@ -178,7 +178,7 @@ distx/
 
 ## Web Dashboard
 
-DistX includes a built-in web dashboard for visual management:
+DistX uses [Qdrant's Web UI](https://github.com/qdrant/qdrant-web-ui), which is fully compatible thanks to our Qdrant API implementation:
 
 ![Dashboard](documentation/dashboard-preview.png)
 
@@ -189,6 +189,7 @@ Access it at http://localhost:6333/dashboard
 - Create and delete collections
 - Browse points with pagination
 - Interactive API console for testing
+- Full compatibility with Qdrant's dashboard features
 
 ## Documentation
 
