@@ -1802,6 +1802,9 @@ async fn delete_field_index(
 }
 
 /// Recommend points based on positive/negative examples
+/// Uses average vector strategy: query = 2*avg(positive) - avg(negative)
+/// This creates a single query vector that moves toward positive examples
+/// and away from negative examples, then performs one efficient search.
 #[derive(Deserialize)]
 struct RecommendRequest {
     #[serde(default)]
@@ -1814,6 +1817,8 @@ struct RecommendRequest {
     with_payload: Option<bool>,
     #[serde(default)]
     with_vector: Option<bool>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
 }
 
 async fn recommend_points(
@@ -1834,37 +1839,133 @@ async fn recommend_points(
 
     let limit = req.limit.unwrap_or(10);
     let with_payload = req.with_payload.unwrap_or(true);
-    let _with_vector = req.with_vector.unwrap_or(false);
+    let with_vector = req.with_vector.unwrap_or(false);
+    let score_threshold = req.score_threshold;
     
-    // Simple recommend: use positive examples to find similar points
-    // Basic implementation - uses first positive example for similarity search
-    let mut results = Vec::new();
+    // Collect point IDs to exclude from results
+    let mut exclude_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     
-    for positive_id in &req.positive {
-        let id_str = match positive_id {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            _ => continue,
-        };
-        
-        if let Some(point) = collection.get(&id_str) {
-            let search_results = collection.search(&point.vector, limit, None);
-            for (found_point, score) in search_results {
-                let mut result = serde_json::json!({
-                    "id": match &found_point.id {
-                        distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
-                        distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
-                        distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
-                    },
-                    "version": 0,
-                    "score": score
-                });
-                if with_payload {
-                    result["payload"] = found_point.payload.unwrap_or(serde_json::Value::Null);
-                }
-                results.push(result);
+    // Helper to parse point ID from JSON
+    let parse_id = |id: &serde_json::Value| -> Option<String> {
+        match id {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    
+    // Collect positive vectors and compute average
+    let mut positive_vectors: Vec<Vec<f32>> = Vec::new();
+    for pos_id in &req.positive {
+        if let Some(id_str) = parse_id(pos_id) {
+            exclude_ids.insert(id_str.clone());
+            if let Some(point) = collection.get(&id_str) {
+                positive_vectors.push(point.vector.as_slice().to_vec());
             }
-            break; // Use first positive example
+        }
+    }
+    
+    if positive_vectors.is_empty() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "status": { "error": "At least one valid positive example is required" }
+        })));
+    }
+    
+    // Collect negative vectors and compute average
+    let mut negative_vectors: Vec<Vec<f32>> = Vec::new();
+    for neg_id in &req.negative {
+        if let Some(id_str) = parse_id(neg_id) {
+            exclude_ids.insert(id_str.clone());
+            if let Some(point) = collection.get(&id_str) {
+                negative_vectors.push(point.vector.as_slice().to_vec());
+            }
+        }
+    }
+    
+    // Compute average of positive vectors
+    let dim = positive_vectors[0].len();
+    let mut avg_positive = vec![0.0f32; dim];
+    for vec in &positive_vectors {
+        for (i, &val) in vec.iter().enumerate() {
+            if i < dim {
+                avg_positive[i] += val;
+            }
+        }
+    }
+    let pos_count = positive_vectors.len() as f32;
+    for val in &mut avg_positive {
+        *val /= pos_count;
+    }
+    
+    // Create query vector: if negatives exist, use formula 2*avg_pos - avg_neg
+    // This moves the query toward positives and away from negatives
+    let query_vector = if !negative_vectors.is_empty() {
+        let mut avg_negative = vec![0.0f32; dim];
+        for vec in &negative_vectors {
+            for (i, &val) in vec.iter().enumerate() {
+                if i < dim {
+                    avg_negative[i] += val;
+                }
+            }
+        }
+        let neg_count = negative_vectors.len() as f32;
+        for val in &mut avg_negative {
+            *val /= neg_count;
+        }
+        
+        // Combined query: 2*avg_pos - avg_neg
+        avg_positive.iter()
+            .zip(avg_negative.iter())
+            .map(|(&pos, &neg)| 2.0 * pos - neg)
+            .collect::<Vec<f32>>()
+    } else {
+        avg_positive
+    };
+    
+    // Perform single search with combined query vector
+    let query = Vector::new(query_vector);
+    
+    // Request more results to account for excluded IDs
+    let search_limit = limit + exclude_ids.len();
+    let search_results = collection.search(&query, search_limit, None);
+    
+    // Build results, excluding input point IDs
+    let mut results = Vec::with_capacity(limit);
+    for (point, score) in search_results {
+        // Skip excluded points (the positive/negative examples)
+        let point_id_str = point.id.to_string();
+        if exclude_ids.contains(&point_id_str) {
+            continue;
+        }
+        
+        // Apply score threshold if provided
+        if let Some(threshold) = score_threshold {
+            if score < threshold {
+                continue;
+            }
+        }
+        
+        let mut result = serde_json::json!({
+            "id": match &point.id {
+                distx_core::PointId::String(s) => serde_json::Value::String(s.clone()),
+                distx_core::PointId::Integer(i) => serde_json::Value::Number((*i).into()),
+                distx_core::PointId::Uuid(u) => serde_json::Value::String(u.to_string()),
+            },
+            "version": 0,
+            "score": score
+        });
+        
+        if with_payload {
+            result["payload"] = point.payload.clone().unwrap_or(serde_json::Value::Null);
+        }
+        if with_vector {
+            result["vector"] = serde_json::json!(point.vector.as_slice());
+        }
+        
+        results.push(result);
+        
+        if results.len() >= limit {
+            break;
         }
     }
 
