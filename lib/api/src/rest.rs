@@ -1281,6 +1281,30 @@ async fn recover_snapshot(
     let collection_name = path.into_inner();
     let location = &req.location;
     
+    // Helper to build response with collection info
+    fn build_recovery_response(collection: &distx_core::Collection) -> HttpResponse {
+        let points_count = collection.count();
+        let vector_dim = collection.vector_dim();
+        
+        if points_count == 0 {
+            // Empty collection - might be from Qdrant snapshot
+            HttpResponse::Ok().json(serde_json::json!({
+                "result": true,
+                "collection": collection.name(),
+                "vector_dim": vector_dim,
+                "points_count": 0,
+                "note": "Collection created with config only. If this was a Qdrant snapshot, points must be migrated separately using the scroll API."
+            }))
+        } else {
+            HttpResponse::Ok().json(serde_json::json!({
+                "result": true,
+                "collection": collection.name(),
+                "vector_dim": vector_dim,
+                "points_count": points_count
+            }))
+        }
+    }
+    
     // Check if it's a URL or local file reference
     if location.starts_with("http://") || location.starts_with("https://") {
         // Remote URL recovery
@@ -1289,11 +1313,7 @@ async fn recover_snapshot(
             location,
             req.checksum.as_deref(),
         ).await {
-            Ok(_collection) => {
-                Ok(HttpResponse::Ok().json(serde_json::json!({
-                    "result": true
-                })))
-            }
+            Ok(collection) => Ok(build_recovery_response(&collection)),
             Err(e) => {
                 Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                     "status": {
@@ -1311,11 +1331,7 @@ async fn recover_snapshot(
             .unwrap_or(location);
         
         match storage.recover_from_snapshot(&collection_name, snapshot_name) {
-            Ok(_collection) => {
-                Ok(HttpResponse::Ok().json(serde_json::json!({
-                    "result": true
-                })))
-            }
+            Ok(collection) => Ok(build_recovery_response(&collection)),
             Err(e) => {
                 Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                     "status": {
@@ -1327,11 +1343,7 @@ async fn recover_snapshot(
     } else {
         // Assume it's a snapshot name directly
         match storage.recover_from_snapshot(&collection_name, location) {
-            Ok(_collection) => {
-                Ok(HttpResponse::Ok().json(serde_json::json!({
-                    "result": true
-                })))
-            }
+            Ok(collection) => Ok(build_recovery_response(&collection)),
             Err(e) => {
                 Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                     "status": {
