@@ -1,5 +1,4 @@
 // SIMD optimizations for vector operations
-// Inspired by Redis (prefetch patterns, scalar fallbacks) and Qdrant (SIMD hierarchy)
 // Uses platform-specific SIMD intrinsics for maximum performance
 
 #[cfg(target_arch = "x86_64")]
@@ -8,7 +7,7 @@ use std::arch::x86_64::*;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
-// Minimum dimension sizes for SIMD (qdrant pattern)
+// Minimum dimension sizes for SIMD optimization
 #[cfg(target_arch = "x86_64")]
 const MIN_DIM_SIZE_AVX: usize = 32;
 
@@ -24,7 +23,7 @@ pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     
-    // Try platform-specific SIMD if available (qdrant hierarchy pattern)
+    // Try platform-specific SIMD if available
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") 
@@ -226,7 +225,7 @@ pub fn l2_distance_simd(a: &[f32], b: &[f32]) -> f32 {
         return f32::INFINITY;
     }
     
-    // Try platform-specific SIMD if available (qdrant hierarchy pattern)
+    // Try platform-specific SIMD if available
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") 

@@ -3,9 +3,9 @@
 Performance benchmark script for DistX
 Tests insert, search, and mixed workload performance via REST API
 
-Inspired by Redis and Qdrant benchmarking patterns:
-- Measures throughput (ops/sec)
-- Measures latency (p50, p95, p99)
+Measures:
+- Throughput (ops/sec)
+- Latency (p50, p95, p99)
 - Tests different vector dimensions
 - Tests concurrent operations
 """

@@ -169,7 +169,7 @@ impl ForkBasedPersistence {
     }
 
     /// Load snapshot from disk (on startup)
-    /// Handles corruption gracefully following Redis/Qdrant patterns:
+    /// Handles corruption gracefully:
     /// - Validates data integrity
     /// - Backs up corrupt files
     /// - Returns None instead of crashing
@@ -180,7 +180,7 @@ impl ForkBasedPersistence {
             return Ok(None);
         }
         
-        // Check for version/marker file (Qdrant pattern)
+        // Check for version/marker file (indicates complete save)
         let version_file = self.rdb_filename.with_extension("version");
         if self.rdb_filename.exists() && !version_file.exists() {
             // Snapshot exists but no version file - incomplete save (crash recovery)
@@ -214,7 +214,7 @@ impl ForkBasedPersistence {
                 Ok(Some(snapshot))
             }
             Err(e) => {
-                // Data is corrupted - backup and start fresh (Redis/Qdrant pattern)
+                // Data is corrupted - backup and start fresh
                 eprintln!("[DistX] Warning: Snapshot data is corrupted: {}", e);
                 eprintln!("[DistX] Starting with empty database.");
                 self.backup_and_remove_corrupt_file("corrupt");
@@ -259,7 +259,7 @@ impl ForkBasedPersistence {
     }
 
     /// Force save (synchronous, blocks until complete)
-    /// Uses atomic rename pattern (Redis) and version markers (Qdrant)
+    /// Uses atomic rename pattern and version markers for data integrity
     pub fn save(&self, collections: &std::collections::HashMap<String, Arc<distx_core::Collection>>) -> Result<()> {
         let snapshot = self.create_snapshot(collections)?;
         let temp_file = self.rdb_filename.with_extension("tmp");
@@ -275,7 +275,7 @@ impl ForkBasedPersistence {
         // Atomic rename (Redis pattern - prevents partial writes)
         std::fs::rename(&temp_file, &self.rdb_filename)?;
         
-        // Write version marker (Qdrant pattern - indicates complete save)
+        // Write version marker (indicates complete save)
         let version_data = format!("distx:0.1.0:{}", data.len());
         std::fs::write(&version_file, version_data)?;
         

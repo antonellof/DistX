@@ -1,6 +1,5 @@
 #!/bin/bash
 # Comprehensive test script for DistX
-# Inspired by Redis and Qdrant testing patterns
 
 set -e
 

@@ -1837,7 +1837,7 @@ async fn recommend_points(
     let _with_vector = req.with_vector.unwrap_or(false);
     
     // Simple recommend: use positive examples to find similar points
-    // This is a basic implementation - Qdrant's is more sophisticated
+    // Basic implementation - uses first positive example for similarity search
     let mut results = Vec::new();
     
     for positive_id in &req.positive {
