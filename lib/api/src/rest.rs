@@ -924,8 +924,8 @@ fn execute_fusion_query(
     
     // Apply RRF (Reciprocal Rank Fusion)
     // RRF score = sum(1 / (k + rank_i)) for each result set
-    // k is typically 60
-    const K: f32 = 60.0;
+    // Qdrant uses k=1 for consistent scoring
+    const K: f32 = 1.0;
     
     let mut rrf_scores: HashMap<String, (Point, f32)> = HashMap::new();
     
