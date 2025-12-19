@@ -1196,23 +1196,64 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
         None => return false,
     };
     
+    // Handle "has_id" condition - filter by point IDs
+    if let Some(ids) = obj.get("has_id").and_then(|h| h.as_array()) {
+        let point_id_str = point.id.to_string();
+        return ids.iter().any(|id| {
+            match id {
+                serde_json::Value::Number(n) => n.to_string() == point_id_str,
+                serde_json::Value::String(s) => s == &point_id_str,
+                _ => false,
+            }
+        });
+    }
+    
+    // Handle "nested" filter - match conditions within same array element
+    if let Some(nested_obj) = obj.get("nested").and_then(|n| n.as_object()) {
+        let nested_key = match nested_obj.get("key").and_then(|k| k.as_str()) {
+            Some(k) => k,
+            None => return false,
+        };
+        let nested_filter = match nested_obj.get("filter") {
+            Some(f) => f,
+            None => return false,
+        };
+        
+        // Get the array field from payload
+        let array_value = match &point.payload {
+            Some(payload) => payload.get(nested_key).and_then(|v| v.as_array()),
+            None => None,
+        };
+        
+        // Check if any array element matches ALL conditions in the nested filter
+        if let Some(arr) = array_value {
+            return arr.iter().any(|element| {
+                matches_nested_element(element, nested_filter)
+            });
+        }
+        return false;
+    }
+    
     // Get the field key
     let key = match obj.get("key").and_then(|k| k.as_str()) {
         Some(k) => k,
-        None => return false,
+        None => {
+            // Handle nested filter (recursive)
+            if obj.contains_key("must") || obj.contains_key("should") || obj.contains_key("must_not") {
+                return matches_filter(point, cond);
+            }
+            return false;
+        }
     };
     
-    // Get the payload value for this key
-    let payload_value = match &point.payload {
-        Some(payload) => payload.get(key),
-        None => None,
-    };
+    // Get the payload value for this key (supports nested paths like "diet[].food")
+    let payload_value = get_nested_value(&point.payload, key);
     
     // Handle "match" condition
     if let Some(match_obj) = obj.get("match").and_then(|m| m.as_object()) {
         // Match exact value
         if let Some(expected) = match_obj.get("value") {
-            return match payload_value {
+            return match &payload_value {
                 Some(actual) => values_equal(actual, expected),
                 None => false,
             };
@@ -1220,7 +1261,7 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
         
         // Match any of values
         if let Some(any_arr) = match_obj.get("any").and_then(|a| a.as_array()) {
-            return match payload_value {
+            return match &payload_value {
                 Some(actual) => any_arr.iter().any(|expected| values_equal(actual, expected)),
                 None => false,
             };
@@ -1228,7 +1269,7 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
         
         // Match text (substring or exact)
         if let Some(text) = match_obj.get("text").and_then(|t| t.as_str()) {
-            return match payload_value {
+            return match &payload_value {
                 Some(serde_json::Value::String(s)) => s.contains(text) || s == text,
                 _ => false,
             };
@@ -1237,7 +1278,7 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
     
     // Handle "range" condition
     if let Some(range_obj) = obj.get("range").and_then(|r| r.as_object()) {
-        let actual_num = match payload_value {
+        let actual_num = match &payload_value {
             Some(serde_json::Value::Number(n)) => n.as_f64(),
             _ => None,
         };
@@ -1260,9 +1301,112 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
         return false;
     }
     
-    // Handle nested filter (recursive)
-    if obj.contains_key("must") || obj.contains_key("should") || obj.contains_key("must_not") {
-        return matches_filter(point, cond);
+    false
+}
+
+/// Get a value from a nested path like "diet[].food" or "nested.field"
+fn get_nested_value(payload: &Option<serde_json::Value>, path: &str) -> Option<serde_json::Value> {
+    let payload = payload.as_ref()?;
+    
+    // Handle array notation like "diet[].food"
+    if path.contains("[]") {
+        let parts: Vec<&str> = path.split("[]").collect();
+        if parts.len() >= 2 {
+            let array_key = parts[0];
+            let field_path = parts[1].trim_start_matches('.');
+            
+            if let Some(arr) = payload.get(array_key).and_then(|v| v.as_array()) {
+                // Collect all matching values from array elements
+                let values: Vec<serde_json::Value> = arr.iter()
+                    .filter_map(|element| {
+                        if field_path.is_empty() {
+                            Some(element.clone())
+                        } else {
+                            element.get(field_path).cloned()
+                        }
+                    })
+                    .collect();
+                
+                if !values.is_empty() {
+                    return Some(serde_json::Value::Array(values));
+                }
+            }
+        }
+        return None;
+    }
+    
+    // Handle dot notation like "nested.field"
+    if path.contains('.') {
+        let mut current = payload;
+        for part in path.split('.') {
+            current = current.get(part)?;
+        }
+        return Some(current.clone());
+    }
+    
+    // Simple key lookup
+    payload.get(path).cloned()
+}
+
+/// Check if an array element matches a nested filter
+fn matches_nested_element(element: &serde_json::Value, filter: &serde_json::Value) -> bool {
+    let filter_obj = match filter.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    
+    // Handle "must" conditions within the element
+    if let Some(must) = filter_obj.get("must").and_then(|m| m.as_array()) {
+        for cond in must {
+            if !matches_element_condition(element, cond) {
+                return false;
+            }
+        }
+    }
+    
+    // Handle "should" conditions
+    if let Some(should) = filter_obj.get("should").and_then(|s| s.as_array()) {
+        if !should.is_empty() {
+            let any_match = should.iter().any(|cond| matches_element_condition(element, cond));
+            if !any_match {
+                return false;
+            }
+        }
+    }
+    
+    // Handle "must_not" conditions
+    if let Some(must_not) = filter_obj.get("must_not").and_then(|m| m.as_array()) {
+        for cond in must_not {
+            if matches_element_condition(element, cond) {
+                return false;
+            }
+        }
+    }
+    
+    true
+}
+
+/// Check if an array element matches a single condition
+fn matches_element_condition(element: &serde_json::Value, cond: &serde_json::Value) -> bool {
+    let obj = match cond.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    
+    let key = match obj.get("key").and_then(|k| k.as_str()) {
+        Some(k) => k,
+        None => return false,
+    };
+    
+    let element_value = element.get(key);
+    
+    if let Some(match_obj) = obj.get("match").and_then(|m| m.as_object()) {
+        if let Some(expected) = match_obj.get("value") {
+            return match element_value {
+                Some(actual) => values_equal(actual, expected),
+                None => false,
+            };
+        }
     }
     
     false
