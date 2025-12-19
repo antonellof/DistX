@@ -598,5 +598,44 @@ impl Collection {
     pub fn iter(&self) -> Vec<Point> {
         self.points.read().values().cloned().collect()
     }
+    
+    /// Search using sparse vectors (dot product on matching indices)
+    pub fn search_sparse(
+        &self,
+        query: &crate::point::SparseVector,
+        vector_name: &str,
+        limit: usize,
+        filter: Option<&dyn Filter>,
+    ) -> Vec<(Point, f32)> {
+        let points = self.points.read();
+        
+        let mut results: Vec<(Point, f32)> = Vec::with_capacity(points.len().min(limit * 2));
+        
+        for point in points.values() {
+            // Apply filter if provided
+            if let Some(f) = filter {
+                if !f.matches(point) {
+                    continue;
+                }
+            }
+            
+            // Get the named sparse vector from the point
+            if let Some(point_sparse) = point.sparse_vectors.get(vector_name) {
+                // Calculate dot product score
+                let score = query.dot(point_sparse);
+                
+                // Only include if score > 0 (at least one matching index)
+                if score > 0.0 {
+                    results.push((point.clone(), score));
+                }
+            }
+        }
+        
+        // Sort by score descending
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        
+        results
+    }
 }
 

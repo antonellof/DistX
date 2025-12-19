@@ -57,7 +57,7 @@ pub mod simd;
 pub use collection::{Collection, CollectionConfig, Distance, PayloadIndexType};
 pub use vector::Vector;
 pub use error::{Error, Result};
-pub use point::{Point, PointId, VectorData};
+pub use point::{Point, PointId, VectorData, SparseVector};
 pub use hnsw::HnswIndex;
 pub use graph::{Node, Edge, NodeId, EdgeId};
 pub use bm25::BM25Index;

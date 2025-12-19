@@ -1,7 +1,49 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use std::collections::HashMap;
 use crate::vector::Vector;
 use crate::multivector::MultiVector;
+
+/// Sparse vector with indices and values
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SparseVector {
+    /// Indices of non-zero elements
+    pub indices: Vec<u32>,
+    /// Values at those indices
+    pub values: Vec<f32>,
+}
+
+impl SparseVector {
+    /// Create a new sparse vector
+    pub fn new(indices: Vec<u32>, values: Vec<f32>) -> Self {
+        Self { indices, values }
+    }
+    
+    /// Compute dot product with another sparse vector
+    pub fn dot(&self, other: &SparseVector) -> f32 {
+        let mut result = 0.0f32;
+        
+        // Create a map of indices to values for efficient lookup
+        let other_map: HashMap<u32, f32> = other.indices.iter()
+            .zip(other.values.iter())
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        
+        // Sum products for matching indices
+        for (&idx, &val) in self.indices.iter().zip(self.values.iter()) {
+            if let Some(&other_val) = other_map.get(&idx) {
+                result += val * other_val;
+            }
+        }
+        
+        result
+    }
+    
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
 
 /// Vector data - can be a single dense vector or a multivector (ColBERT-style)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +112,9 @@ pub struct Point {
     /// Optional multivector data for ColBERT-style search
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multivector: Option<MultiVector>,
+    /// Named sparse vectors (e.g., {"keywords": SparseVector})
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sparse_vectors: HashMap<String, SparseVector>,
     pub payload: Option<serde_json::Value>,
 }
 
@@ -119,6 +164,7 @@ impl Point {
             version: 0,
             vector,
             multivector: None,
+            sparse_vectors: HashMap::new(),
             payload,
         }
     }
@@ -134,8 +180,33 @@ impl Point {
             version: 0,
             vector,
             multivector: Some(multivector),
+            sparse_vectors: HashMap::new(),
             payload,
         }
+    }
+    
+    /// Create a new point with sparse vectors
+    #[inline]
+    #[must_use]
+    pub fn new_sparse(id: PointId, sparse_vectors: HashMap<String, SparseVector>, payload: Option<serde_json::Value>) -> Self {
+        Self {
+            id,
+            version: 0,
+            vector: Vector::new(vec![0.0]), // Placeholder for sparse-only points
+            multivector: None,
+            sparse_vectors,
+            payload,
+        }
+    }
+    
+    /// Add a sparse vector to this point
+    pub fn add_sparse_vector(&mut self, name: String, sparse: SparseVector) {
+        self.sparse_vectors.insert(name, sparse);
+    }
+    
+    /// Get a sparse vector by name
+    pub fn get_sparse_vector(&self, name: &str) -> Option<&SparseVector> {
+        self.sparse_vectors.get(name)
     }
     
     /// Check if this point has multivector data

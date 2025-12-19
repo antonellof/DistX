@@ -127,12 +127,24 @@ struct UpsertPointsRequest {
     points: Vec<PointRequest>,
 }
 
-/// Parsed vector data - can be single or multi
+/// Parsed sparse vector data
+struct ParsedSparseVector {
+    /// Name of the sparse vector (e.g., "keywords")
+    name: String,
+    /// Indices of non-zero elements
+    indices: Vec<u32>,
+    /// Values at those indices
+    values: Vec<f32>,
+}
+
+/// Parsed vector data - can be single, multi, or sparse
 struct ParsedVector {
     /// First/primary vector (for backwards compatibility)
     primary: Vec<f32>,
     /// Full multivector data if this was a multivector input
     multivector: Option<Vec<Vec<f32>>>,
+    /// Sparse vectors (named)
+    sparse_vectors: Vec<ParsedSparseVector>,
 }
 
 #[derive(Deserialize)]
@@ -178,13 +190,13 @@ where
                 // Simple vector: [0.1, 0.2, 0.3]
                 Some(serde_json::Value::Number(_)) => {
                     let primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
-                    Ok(ParsedVector { primary, multivector: None })
+                    Ok(ParsedVector { primary, multivector: None, sparse_vectors: Vec::new() })
                 }
                 // Multivector: [[0.1, 0.2], [0.3, 0.4]] - store full multivector
                 Some(serde_json::Value::Array(_)) => {
                     let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
                     let primary = multivec.first().cloned().unwrap_or_default();
-                    Ok(ParsedVector { primary, multivector: Some(multivec) })
+                    Ok(ParsedVector { primary, multivector: Some(multivec), sparse_vectors: Vec::new() })
                 }
                 _ => Err(serde::de::Error::custom("invalid vector format: expected number or array"))
             }
@@ -196,72 +208,56 @@ where
         // Named vector: {"vector_name": [0.1, 0.2]} or {"": [...]}
         // Or sparse vector: {"keywords": {"indices": [...], "values": [...]}}
         serde_json::Value::Object(obj) => {
-            if let Some((_, vec_value)) = obj.iter().next() {
+            let mut sparse_vectors = Vec::new();
+            let mut primary = vec![0.0];
+            let mut multivector = None;
+            
+            for (name, vec_value) in obj.iter() {
                 match vec_value {
                     // Dense named vector: [0.1, 0.2, 0.3]
                     serde_json::Value::Array(arr) if !arr.is_empty() => {
                         match arr.first() {
                             Some(serde_json::Value::Number(_)) => {
-                                let primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
-                                Ok(ParsedVector { primary, multivector: None })
+                                primary = parse_simple_vector(arr).map_err(serde::de::Error::custom)?;
                             }
                             Some(serde_json::Value::Array(_)) => {
                                 // Named multivector
                                 let multivec = parse_multivector(arr).map_err(serde::de::Error::custom)?;
-                                let primary = multivec.first().cloned().unwrap_or_default();
-                                Ok(ParsedVector { primary, multivector: Some(multivec) })
+                                primary = multivec.first().cloned().unwrap_or_default();
+                                multivector = Some(multivec);
                             }
-                            _ => Err(serde::de::Error::custom("invalid named vector format"))
+                            _ => {}
                         }
                     }
                     // Sparse vector: {"indices": [...], "values": [...]}
                     serde_json::Value::Object(sparse_obj) => {
-                        let indices = sparse_obj.get("indices")
-                            .and_then(|i| i.as_array())
-                            .ok_or_else(|| serde::de::Error::custom("sparse vector missing 'indices' array"))?;
-                        let values = sparse_obj.get("values")
-                            .and_then(|v| v.as_array())
-                            .ok_or_else(|| serde::de::Error::custom("sparse vector missing 'values' array"))?;
-                        
-                        if indices.is_empty() || values.is_empty() {
-                            // Empty sparse vector - create minimal placeholder
-                            return Ok(ParsedVector { primary: vec![0.0], multivector: None });
+                        if let (Some(indices_arr), Some(values_arr)) = (
+                            sparse_obj.get("indices").and_then(|i| i.as_array()),
+                            sparse_obj.get("values").and_then(|v| v.as_array())
+                        ) {
+                            let indices: Vec<u32> = indices_arr.iter()
+                                .filter_map(|i| i.as_u64().map(|n| n as u32))
+                                .collect();
+                            let values: Vec<f32> = values_arr.iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect();
+                            
+                            if !indices.is_empty() && !values.is_empty() {
+                                sparse_vectors.push(ParsedSparseVector {
+                                    name: name.clone(),
+                                    indices,
+                                    values,
+                                });
+                            }
                         }
-                        
-                        // Convert sparse to dense-ish format
-                        // Find max index to determine vector dimension
-                        let max_idx = indices.iter()
-                            .filter_map(|i| i.as_u64())
-                            .max()
-                            .unwrap_or(0) as usize;
-                        
-                        // Create a vector with values at specified indices
-                        // For efficiency, we'll just store the values directly
-                        // In a full implementation, this would be a proper sparse vector
-                        let sparse_values: Vec<f32> = values.iter()
-                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                            .collect();
-                        
-                        // Store as the primary vector (dense representation would be too large)
-                        // Just use the values array for now
-                        let primary = if sparse_values.is_empty() {
-                            vec![0.0]
-                        } else {
-                            sparse_values
-                        };
-                        
-                        Ok(ParsedVector { primary, multivector: None })
                     }
-                    // Empty array
-                    serde_json::Value::Array(_) => {
-                        // Allow empty arrays for sparse-only collections
-                        Ok(ParsedVector { primary: vec![0.0], multivector: None })
-                    }
-                    _ => Err(serde::de::Error::custom("named vector value must be an array or sparse object"))
+                    // Empty array - ignore
+                    serde_json::Value::Array(_) => {}
+                    _ => {}
                 }
-            } else {
-                Err(serde::de::Error::custom("empty named vector object"))
             }
+            
+            Ok(ParsedVector { primary, multivector, sparse_vectors })
         }
         _ => Err(serde::de::Error::custom("vector must be an array or object")),
     }
@@ -630,8 +626,8 @@ async fn upsert_points(
             _ => return Err("Invalid point ID"),
         };
 
-        // Create point with multivector support
-        let point = if let Some(ref multivec_data) = point_req.vector.multivector {
+        // Create point with multivector and sparse vector support
+        let mut point = if let Some(ref multivec_data) = point_req.vector.multivector {
             // Create MultiVector and Point with multivector
             match MultiVector::new(multivec_data.clone()) {
                 Ok(mv) => Point::new_multi(id, mv, point_req.payload.clone()),
@@ -646,6 +642,15 @@ async fn upsert_points(
             let vector = Vector::new(point_req.vector.primary.clone());
             Point::new(id, vector, point_req.payload.clone())
         };
+        
+        // Add sparse vectors if present
+        for sparse in &point_req.vector.sparse_vectors {
+            let sparse_vec = distx_core::SparseVector::new(
+                sparse.indices.clone(),
+                sparse.values.clone()
+            );
+            point.add_sparse_vector(sparse.name.clone(), sparse_vec);
+        }
         
         Ok(point)
     }).collect();
@@ -852,8 +857,11 @@ async fn query_points(
             parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
         });
         
-        // Determine query type: point ID, single vector, or multivector
-        match execute_simple_query(&collection, &req.query, limit, filter.as_deref()) {
+        // Get the "using" parameter for named/sparse vector queries
+        let using = req.using.as_deref();
+        
+        // Determine query type: point ID, single vector, sparse, or multivector
+        match execute_simple_query(&collection, &req.query, limit, filter.as_deref(), using) {
             Ok(r) => r,
             Err(e) => return Ok(qdrant_error(&e, start_time)),
         }
@@ -908,8 +916,9 @@ fn execute_fusion_query(
             parse_filter(f).map(|cond| Box::new(PayloadFilter::new(cond)) as Box<dyn Filter>)
         });
         
-        // Parse the prefetch query
-        let pf_results = parse_and_search(collection, &pf.query, pf_limit, filter.as_deref())?;
+        // Parse the prefetch query, using the "using" parameter for named/sparse vectors
+        let using = pf.using.as_deref();
+        let pf_results = parse_and_search(collection, &pf.query, pf_limit, filter.as_deref(), using)?;
         all_results.push(pf_results);
     }
     
@@ -946,24 +955,35 @@ fn parse_and_search(
     query: &serde_json::Value,
     limit: usize,
     filter: Option<&dyn Filter>,
+    using: Option<&str>,
 ) -> Result<Vec<(Point, f32)>, String> {
     match query {
         // Sparse vector format: {"indices": [...], "values": [...]}
         serde_json::Value::Object(obj) if obj.contains_key("indices") && obj.contains_key("values") => {
+            let indices = obj.get("indices")
+                .and_then(|i| i.as_array())
+                .ok_or("Invalid sparse vector: missing indices")?;
             let values = obj.get("values")
                 .and_then(|v| v.as_array())
                 .ok_or("Invalid sparse vector: missing values")?;
             
-            let vector_data: Vec<f32> = values.iter()
+            let indices_vec: Vec<u32> = indices.iter()
+                .filter_map(|i| i.as_u64().map(|n| n as u32))
+                .collect();
+            let values_vec: Vec<f32> = values.iter()
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
             
-            if vector_data.is_empty() {
+            if indices_vec.is_empty() || values_vec.is_empty() {
                 return Ok(Vec::new());
             }
             
-            let query_vector = Vector::new(vector_data);
-            Ok(collection.search(&query_vector, limit, filter))
+            // Use the "using" parameter as the sparse vector name, default to "default"
+            let vector_name = using.unwrap_or("default");
+            let query_sparse = distx_core::SparseVector::new(indices_vec, values_vec);
+            
+            // Perform sparse dot product search
+            Ok(collection.search_sparse(&query_sparse, vector_name, limit, filter))
         }
         // Array: single vector or multivector
         serde_json::Value::Array(arr) if !arr.is_empty() => {
@@ -1009,6 +1029,7 @@ fn execute_simple_query(
     query: &serde_json::Value,
     limit: usize,
     filter: Option<&dyn Filter>,
+    using: Option<&str>,
 ) -> Result<Vec<(Point, f32)>, String> {
     match query {
         // Query by point ID (nearest to existing point)
@@ -1047,7 +1068,7 @@ fn execute_simple_query(
             }
         }
         // Arrays and sparse vectors
-        _ => parse_and_search(collection, query, limit, filter)
+        _ => parse_and_search(collection, query, limit, filter, using)
     }
 }
 
