@@ -1267,10 +1267,15 @@ fn matches_condition(point: &Point, cond: &serde_json::Value) -> bool {
             };
         }
         
-        // Match text (substring or exact)
+        // Match text (words OR - any word in query matches)
         if let Some(text) = match_obj.get("text").and_then(|t| t.as_str()) {
             return match &payload_value {
-                Some(serde_json::Value::String(s)) => s.contains(text) || s == text,
+                Some(serde_json::Value::String(s)) => {
+                    let s_lower = s.to_lowercase();
+                    // Split query into words and check if any word matches
+                    text.split_whitespace()
+                        .any(|word| s_lower.contains(&word.to_lowercase()))
+                }
                 _ => false,
             };
         }
