@@ -1,5 +1,5 @@
 use distx_core::{Collection, CollectionConfig, Distance, Error, Result, Point, PointId, Vector, MultiVector};
-use distx_similarity::{SimilaritySchema, StructuredEmbedder};
+use distx_schema::{SimilaritySchema, StructuredEmbedder};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

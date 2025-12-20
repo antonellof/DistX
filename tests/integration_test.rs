@@ -1,7 +1,7 @@
 // Integration tests for DistX
 use distx_core::{Collection, CollectionConfig, Distance, Point, PointId, Vector};
 use distx_storage::StorageManager;
-use distx_similarity::{SimilaritySchema, FieldConfig, DistanceType, StructuredEmbedder, Reranker};
+use distx_schema::{SimilaritySchema, FieldConfig, DistanceType, StructuredEmbedder, Reranker};
 use std::collections::HashMap;
 
 #[test]

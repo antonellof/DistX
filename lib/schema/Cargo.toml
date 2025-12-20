@@ -1,15 +1,15 @@
 [package]
-name = "distx-similarity"
-version = "0.2.5"
+name = "distx-schema"
+version = "0.2.6"
 edition = "2021"
 rust-version = "1.75"
-description = "Schema-driven similarity engine for tabular rows - part of DistX"
+description = "Schema-driven structured similarity for tabular data - the Similarity Contract engine for DistX"
 authors = ["antonellof"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/antonellof/distx"
-documentation = "https://docs.rs/distx-similarity"
+documentation = "https://docs.rs/distx-schema"
 readme = "../../README.md"
-keywords = ["similarity", "tabular", "schema-driven", "embeddings", "reranking"]
+keywords = ["schema", "structured-data", "tabular", "similarity-contract", "explainability"]
 categories = ["database", "data-structures", "algorithms"]
 
 [dependencies]
@@ -19,7 +19,7 @@ thiserror = "1.0"
 ahash = "0.8"
 
 # Internal dependencies
-distx-core = { version = "0.2.5", path = "../core" }
+distx-core = { version = "0.2.6", path = "../core" }
 
 [dev-dependencies]
 tempfile = "3.0"

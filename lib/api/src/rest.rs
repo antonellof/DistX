@@ -5,7 +5,7 @@ use actix_multipart::Multipart;
 use chrono::Utc;
 use distx_core::{CollectionConfig, Collection, Distance, Point, PointId, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
-use distx_similarity::{SimilaritySchema, StructuredEmbedder, Reranker, ExplainedResult, SimilarResponse};
+use distx_schema::{SimilaritySchema, StructuredEmbedder, Reranker, ExplainedResult, SimilarResponse};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::path::Path;

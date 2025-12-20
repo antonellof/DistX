@@ -22,16 +22,16 @@ COPY Cargo.toml Cargo.lock ./
 COPY lib/core/Cargo.toml lib/core/
 COPY lib/storage/Cargo.toml lib/storage/
 COPY lib/api/Cargo.toml lib/api/
-COPY lib/similarity/Cargo.toml lib/similarity/
+COPY lib/schema/Cargo.toml lib/schema/
 
 # Create dummy source files to build dependencies
-RUN mkdir -p src lib/core/src lib/storage/src lib/api/src lib/api/proto lib/similarity/src && \
+RUN mkdir -p src lib/core/src lib/storage/src lib/api/src lib/api/proto lib/schema/src && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn dummy() {}" > src/lib.rs && \
     echo "pub fn dummy() {}" > lib/core/src/lib.rs && \
     echo "pub fn dummy() {}" > lib/storage/src/lib.rs && \
     echo "pub fn dummy() {}" > lib/api/src/lib.rs && \
-    echo "pub fn dummy() {}" > lib/similarity/src/lib.rs
+    echo "pub fn dummy() {}" > lib/schema/src/lib.rs
 
 # Copy proto files and build script
 COPY lib/api/proto lib/api/proto/
@@ -45,7 +45,7 @@ COPY tools/ tools/
 RUN mkdir -p /static && STATIC_DIR=/static ./tools/sync-web-ui.sh
 
 # Remove dummy sources and built artifacts for our crates
-RUN rm -rf src lib/core/src lib/storage/src lib/api/src lib/similarity/src && \
+RUN rm -rf src lib/core/src lib/storage/src lib/api/src lib/schema/src && \
     rm -rf target/release/distx target/release/deps/distx* && \
     rm -rf target/release/deps/libdistx* && \
     rm -rf target/release/.fingerprint/distx* && \

@@ -5,14 +5,38 @@
 [![Docker](https://img.shields.io/docker/v/distx/distx?label=docker)](https://hub.docker.com/r/distx/distx)
 [![License](https://img.shields.io/crates/l/distx.svg)](https://github.com/antonellof/DistX#license)
 
-A high-performance vector database with **schema-driven similarity search**.
+> **DistX does not store vectors that represent objects.  
+> It stores objects, and derives vectors from their structure.**
 
-DistX combines the speed of a Rust-native vector database with an innovative Similarity Engine that enables structured queries on tabular data — with full explainability and without external ML dependencies.
+A high-performance vector database with the **Similarity Contract** — a schema-driven approach to structured similarity search that is deterministic, explainable, and requires no external ML.
 
-- **Qdrant API Compatible** — Drop-in replacement, use existing client libraries
-- **Schema-Driven Similarity** — Define field types and weights declaratively
-- **Explainable Results** — Per-field contribution breakdown for every match
-- **Zero ML Dependencies** — No OpenAI, no embeddings pipeline, works offline
+---
+
+## The Similarity Contract
+
+The schema is not just configuration — it's a **contract** that governs:
+
+| Aspect | What the Schema Controls |
+|--------|--------------------------|
+| **Ingest** | How objects are converted to vectors (deterministic, reproducible) |
+| **Query** | How similarity is computed across multiple field types |
+| **Ranking** | How results are scored with structured distance functions |
+| **Explainability** | How each field contributes to the final score |
+
+**This is an architectural difference**, not just an API feature. You cannot replicate this with Qdrant hybrid queries without replicating half this codebase client-side.
+
+---
+
+## What DistX Is (and Is Not)
+
+| DistX IS | DistX is NOT |
+|----------|--------------|
+| A contract-based similarity engine | A neural embedding model |
+| Deterministic and reproducible | A probabilistic LLM system |
+| Designed for structured/tabular data | A black-box recommender |
+| Fully explainable (per-field scores) | Dependent on external ML APIs |
+
+**Target domains**: ERP, e-commerce, CRM, financial data, any tabular dataset.
 
 ---
 
@@ -24,11 +48,13 @@ DistX combines the speed of a Rust-native vector database with an innovative Sim
 │  ───────────────────────────                                             │
 │  Your Data → External ML API → Embeddings → Vector DB → Score: 0.87     │
 │              (cost per call)   (black box)              (unexplained)    │
+│              (model drift)     (retraining)             (no breakdown)   │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  DistX Similarity Engine                                                 │
-│  ───────────────────────────                                             │
-│  Your Data → Schema (JSON) → Auto-Embedding → Explainable Results       │
-│              (declarative)    (deterministic)  (name: 0.25, price: 0.22) │
+│  DistX with Similarity Contract                                          │
+│  ──────────────────────────────                                          │
+│  Your Data → Schema (JSON) → Deterministic → Explainable Results        │
+│              (contract)       (no drift)     (name: 0.25, price: 0.22)   │
+│              (stable)         (reproducible) (auditable)                 │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,11 +62,11 @@ DistX combines the speed of a Rust-native vector database with an innovative Sim
 
 ---
 
-## Similarity Engine
+## Similarity Contract Engine
 
-**The first schema-driven similarity engine with built-in explainability.**
+**The first schema-driven structured similarity engine with built-in explainability.**
 
-Define what fields matter, insert your data, and query by example — vectors are generated automatically. No external ML services, no embedding pipelines, no black-box scores.
+Define a Similarity Contract, insert your data, and query by example — vectors are derived automatically from object structure. No external ML, no embedding pipelines, no black-box scores.
 
 ```bash
 # 1. Define similarity schema
@@ -92,11 +118,46 @@ curl -X POST http://localhost:6333/collections/products/similar -H "Content-Type
 | **Dynamic Weights** | Override field importance at query time without re-indexing |
 | **Zero External Dependencies** | Fully self-contained, works offline and air-gapped |
 
+### What You Can Do That Qdrant Cannot
+
+#### Example 1: Change Similarity Semantics Without Re-embedding
+
 ```bash
-# Override weights at query time
-curl -X POST http://localhost:6333/collections/products/similar \
-  -d '{"example": {"name": "iPhone"}, "weights": {"price": 0.7, "name": 0.1}}'
+# Same data, different meaning of "similar" — no re-indexing required
+
+# Query 1: "Find similar products" (balanced)
+curl -X POST /collections/products/similar \
+  -d '{"example": {"name": "iPhone 15"}, "limit": 5}'
+
+# Query 2: "Find cheaper alternatives" (boost price)
+curl -X POST /collections/products/similar \
+  -d '{"example": {"name": "iPhone 15"}, "weights": {"price": 0.7, "name": 0.2}, "limit": 5}'
+
+# Query 3: "Find same brand, any price" (boost brand)
+curl -X POST /collections/products/similar \
+  -d '{"example": {"name": "iPhone 15"}, "weights": {"brand": 0.6, "category": 0.3}, "limit": 5}'
 ```
+
+In Qdrant: You would need to re-embed everything or build complex client-side logic.
+
+#### Example 2: Same Schema, Different Datasets
+
+```bash
+# One Similarity Contract works across domains:
+
+# Products
+{"name": "iPhone 15", "price": 999, "category": "electronics", "brand": "Apple"}
+
+# Suppliers  
+{"name": "Acme Corp", "price": 5000000, "category": "manufacturing", "brand": "certified"}
+
+# Financial Assets
+{"name": "AAPL Stock", "price": 178.50, "category": "equity", "brand": "tech"}
+
+# Same schema, same queries, same explainability — across all datasets
+```
+
+This is **not product-specific**. The Similarity Contract is domain-agnostic.
 
 📖 [Documentation](documentation/SIMILARITY_ENGINE.md) · [Interactive Demo](documentation/SIMILARITY_DEMO.md) · [Comparison with Alternatives](documentation/COMPARISON.md)
 
@@ -556,7 +617,7 @@ curl -X POST /collections/employees/similar -d '{
 ```toml
 [dependencies]
 distx = "0.2.5"
-distx-similarity = "0.2.5"  # Similarity Engine
+distx-schema = "0.2.5"  # Similarity Engine
 distx-core = "0.2.5"        # Core data structures
 ```
 
