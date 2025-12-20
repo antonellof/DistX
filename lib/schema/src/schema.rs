@@ -1,16 +1,17 @@
 //! Similarity Schema definitions
 //!
-//! Defines the declarative schema for structured similarity queries.
-//! The schema specifies which fields matter for similarity, what type of
-//! similarity to use per field, and the weight of each field.
+//! Defines the schema for structured similarity reranking.
+//! The schema specifies field types, distance metrics, and weights
+//! used to rerank vector search results.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Similarity schema version 1
+/// Similarity schema for structured reranking
 /// 
-/// A declarative schema that defines how to compute similarity for tabular rows.
-/// Stored at collection level and used for both embedding and reranking.
+/// Defines how payload fields should be compared when reranking
+/// vector search results. Each field has a type, distance metric,
+/// and weight in the final score.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SimilaritySchema {
     /// Schema version for future compatibility
@@ -34,9 +35,7 @@ impl SimilaritySchema {
         }
     }
 
-    /// Validate the schema
-    /// - Checks that weights are positive
-    /// - Normalizes weights to sum to 1.0 if they don't
+    /// Validate the schema and normalize weights to sum to 1.0
     pub fn validate_and_normalize(&mut self) -> Result<(), SchemaError> {
         if self.fields.is_empty() {
             return Err(SchemaError::EmptySchema);
@@ -66,19 +65,6 @@ impl SimilaritySchema {
         Ok(())
     }
 
-    /// Get the total number of dimensions needed for the composite vector
-    /// Each field type contributes a fixed number of dimensions
-    pub fn compute_vector_dim(&self, text_dim: usize) -> usize {
-        self.fields.values().map(|config| {
-            match config.field_type {
-                FieldType::Text => text_dim,
-                FieldType::Number => 1,
-                FieldType::Categorical => 64, // Hash-based encoding
-                FieldType::Boolean => 1,
-            }
-        }).sum()
-    }
-
     /// Get field names in a deterministic order (sorted)
     pub fn sorted_field_names(&self) -> Vec<&String> {
         let mut names: Vec<_> = self.fields.keys().collect();
@@ -106,10 +92,6 @@ pub struct FieldConfig {
     /// Weight of this field in the overall similarity score (0.0 to 1.0)
     #[serde(default = "default_weight")]
     pub weight: f32,
-    
-    /// Embedding type for text fields (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embedding: Option<EmbeddingType>,
 }
 
 fn default_weight() -> f32 {
@@ -117,43 +99,48 @@ fn default_weight() -> f32 {
 }
 
 impl FieldConfig {
-    /// Create a new text field configuration
+    /// Create a text field config
+    /// 
+    /// Text fields are compared using trigram similarity during reranking.
+    /// For semantic search, use client-side embeddings + vector search.
     pub fn text(weight: f32) -> Self {
         Self {
             field_type: FieldType::Text,
             distance: DistanceType::Semantic,
             weight,
-            embedding: Some(EmbeddingType::Semantic),
         }
     }
 
-    /// Create a new number field configuration
+    /// Create a number field config
+    /// 
+    /// Use Relative for comparing values of different magnitudes (e.g., prices).
+    /// Use Absolute for values in the same range (e.g., ratings 1-5).
     pub fn number(weight: f32, distance: DistanceType) -> Self {
         Self {
             field_type: FieldType::Number,
             distance,
             weight,
-            embedding: None,
         }
     }
 
-    /// Create a new categorical field configuration
+    /// Create a categorical field config
+    /// 
+    /// Categorical fields use exact match by default.
+    /// Use Overlap for multi-value categories.
     pub fn categorical(weight: f32) -> Self {
         Self {
             field_type: FieldType::Categorical,
             distance: DistanceType::Exact,
             weight,
-            embedding: None,
         }
     }
 
-    /// Create a new boolean field configuration
+    /// Create a boolean field config
     pub fn boolean(weight: f32) -> Self {
         Self {
             field_type: FieldType::Boolean,
             distance: DistanceType::Exact,
             weight,
-            embedding: None,
         }
     }
 }
@@ -162,7 +149,7 @@ impl FieldConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
-    /// Text field - uses semantic or exact matching
+    /// Text field - uses trigram or exact matching for reranking
     Text,
     /// Numeric field - uses absolute or relative distance
     Number,
@@ -176,27 +163,17 @@ pub enum FieldType {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceType {
-    /// Semantic similarity (for text) - uses embeddings
+    /// Trigram similarity for text fields
     #[default]
     Semantic,
-    /// Absolute distance: 1 - |a - b| / max_range
+    /// Absolute distance: exp(-|a - b| / scale)
     Absolute,
     /// Relative distance: 1 - |a - b| / max(|a|, |b|)
     Relative,
     /// Exact match: 1 if equal, 0 otherwise
     Exact,
-    /// Overlap/Jaccard similarity for sets or tokens
+    /// Overlap/Jaccard similarity for token sets
     Overlap,
-}
-
-/// Embedding type for text fields
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum EmbeddingType {
-    /// Semantic embeddings (hash-based in v1, can be extended to ML)
-    Semantic,
-    /// Exact string matching only
-    Exact,
 }
 
 /// Errors that can occur during schema validation
@@ -213,9 +190,6 @@ pub enum SchemaError {
     
     #[error("Field '{0}' not found in schema")]
     FieldNotFound(String),
-    
-    #[error("Invalid field type for distance metric")]
-    InvalidDistanceForType,
 }
 
 #[cfg(test)]
@@ -254,35 +228,6 @@ mod tests {
             schema.validate_and_normalize(),
             Err(SchemaError::EmptySchema)
         ));
-    }
-
-    #[test]
-    fn test_negative_weight_error() {
-        let mut fields = HashMap::new();
-        fields.insert("a".to_string(), FieldConfig {
-            field_type: FieldType::Text,
-            distance: DistanceType::Semantic,
-            weight: -0.5,
-            embedding: None,
-        });
-
-        let mut schema = SimilaritySchema::new(fields);
-        assert!(matches!(
-            schema.validate_and_normalize(),
-            Err(SchemaError::NegativeWeight(_))
-        ));
-    }
-
-    #[test]
-    fn test_compute_vector_dim() {
-        let mut fields = HashMap::new();
-        fields.insert("name".to_string(), FieldConfig::text(0.5));
-        fields.insert("price".to_string(), FieldConfig::number(0.3, DistanceType::Relative));
-        fields.insert("active".to_string(), FieldConfig::boolean(0.2));
-
-        let schema = SimilaritySchema::new(fields);
-        let dim = schema.compute_vector_dim(64); // 64-dim text embedding
-        assert_eq!(dim, 64 + 1 + 1); // text + number + boolean
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Integration tests for DistX
 use distx_core::{Collection, CollectionConfig, Distance, Point, PointId, Vector};
 use distx_storage::StorageManager;
-use distx_schema::{SimilaritySchema, FieldConfig, DistanceType, StructuredEmbedder, Reranker};
+use distx_schema::{SimilaritySchema, FieldConfig, DistanceType, Reranker};
 use std::collections::HashMap;
 
 #[test]
@@ -238,33 +238,10 @@ fn test_similarity_schema_creation() {
     assert!((weight_sum - 1.0).abs() < 0.01);
 }
 
-#[test]
-fn test_structured_embedder() {
-    let mut fields = HashMap::new();
-    fields.insert("name".to_string(), FieldConfig::text(0.5));
-    fields.insert("price".to_string(), FieldConfig::number(0.3, DistanceType::Relative));
-    fields.insert("category".to_string(), FieldConfig::categorical(0.2));
-
-    let schema = SimilaritySchema::new(fields);
-    let embedder = StructuredEmbedder::new(schema);
-    
-    // Embed a product payload
-    let payload = serde_json::json!({
-        "name": "Prosciutto cotto",
-        "price": 1.99,
-        "category": "salumi"
-    });
-    
-    let vector = embedder.embed(&payload);
-    assert_eq!(vector.dim(), embedder.vector_dim());
-    
-    // Vector should be normalized
-    let magnitude: f32 = vector.as_slice().iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!((magnitude - 1.0).abs() < 0.01);
-}
+// Note: Embedding is now done client-side. These tests use mock vectors.
 
 #[test]
-fn test_similarity_with_embedder_and_collection() {
+fn test_similarity_with_vectors_and_collection() {
     // Create a schema for products
     let mut fields = HashMap::new();
     fields.insert("name".to_string(), FieldConfig::text(0.5));
@@ -272,12 +249,11 @@ fn test_similarity_with_embedder_and_collection() {
     fields.insert("category".to_string(), FieldConfig::categorical(0.2));
 
     let schema = SimilaritySchema::new(fields);
-    let embedder = StructuredEmbedder::new(schema.clone());
     
-    // Create collection with vector dimension from embedder
+    // Create collection with a standard embedding dimension
     let config = CollectionConfig {
         name: "products".to_string(),
-        vector_dim: embedder.vector_dim(),
+        vector_dim: 3,  // Simple mock vectors
         distance: Distance::Cosine,
         use_hnsw: false,
         enable_bm25: false,
@@ -285,37 +261,31 @@ fn test_similarity_with_embedder_and_collection() {
     
     let collection = Collection::new(config);
     
-    // Insert products using auto-embedding
+    // Insert products with mock vectors (in real use, these come from OpenAI etc.)
     let products = vec![
-        serde_json::json!({"name": "Prosciutto cotto", "price": 1.99, "category": "salumi"}),
-        serde_json::json!({"name": "Prosciutto crudo", "price": 2.49, "category": "salumi"}),
-        serde_json::json!({"name": "Mortadella", "price": 1.79, "category": "salumi"}),
-        serde_json::json!({"name": "iPhone 15", "price": 999.0, "category": "electronics"}),
-        serde_json::json!({"name": "Samsung Galaxy", "price": 899.0, "category": "electronics"}),
+        (vec![1.0, 0.0, 0.0], serde_json::json!({"name": "Prosciutto cotto", "price": 1.99, "category": "salumi"})),
+        (vec![0.9, 0.1, 0.0], serde_json::json!({"name": "Prosciutto crudo", "price": 2.49, "category": "salumi"})),
+        (vec![0.8, 0.2, 0.0], serde_json::json!({"name": "Mortadella", "price": 1.79, "category": "salumi"})),
+        (vec![0.0, 0.0, 1.0], serde_json::json!({"name": "iPhone 15", "price": 999.0, "category": "electronics"})),
+        (vec![0.1, 0.0, 0.9], serde_json::json!({"name": "Samsung Galaxy", "price": 899.0, "category": "electronics"})),
     ];
     
-    for (i, payload) in products.iter().enumerate() {
-        let vector = embedder.embed(payload);
+    for (i, (vec, payload)) in products.iter().enumerate() {
         let point = Point::new(
             PointId::Integer(i as u64),
-            vector,
+            Vector::new(vec.clone()),
             Some(payload.clone()),
         );
         collection.upsert(point).unwrap();
     }
     
-    // Query for similar products
-    let query_payload = serde_json::json!({
-        "name": "prosciutto",
-        "price": 2.0,
-        "category": "salumi"
-    });
-    let query_vector = embedder.embed(&query_payload);
+    // Query with a vector similar to salumi products
+    let query_vector = Vector::new(vec![0.95, 0.05, 0.0]);
     
     let results = collection.search(&query_vector, 3, None);
     assert_eq!(results.len(), 3);
     
-    // Top results should be salumi products
+    // Top results should be salumi products (similar vectors)
     let top_category = results[0].0.payload
         .as_ref()
         .and_then(|p| p.get("category"))

@@ -1,5 +1,5 @@
 use distx_core::{Collection, CollectionConfig, Distance, Error, Result, Point, PointId, Vector, MultiVector};
-use distx_schema::{SimilaritySchema, StructuredEmbedder};
+use distx_schema::SimilaritySchema;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,10 +15,8 @@ pub struct StorageManager {
     collections: Arc<RwLock<HashMap<String, Arc<Collection>>>>,
     /// Aliases: alias_name -> collection_name
     aliases: Arc<RwLock<HashMap<String, String>>>,
-    /// Similarity schemas per collection
+    /// Similarity schemas per collection (for reranking)
     similarity_schemas: Arc<RwLock<HashMap<String, SimilaritySchema>>>,
-    /// Structured embedders per collection (cached)
-    embedders: Arc<RwLock<HashMap<String, Arc<StructuredEmbedder>>>>,
     data_dir: PathBuf,
     #[allow(dead_code)]
     lmdb: Option<Arc<LmdbStorage>>,
@@ -52,7 +50,6 @@ impl StorageManager {
         let collections = Arc::new(RwLock::new(HashMap::new()));
         let aliases = Arc::new(RwLock::new(HashMap::new()));
         let similarity_schemas = Arc::new(RwLock::new(HashMap::new()));
-        let embedders = Arc::new(RwLock::new(HashMap::new()));
         
         if let Some(snapshot) = persistence.load_snapshot()
             .map_err(|e| Error::Persistence(e.to_string()))? {
@@ -99,13 +96,6 @@ impl StorageManager {
             if let Ok(data) = std::fs::read_to_string(&schemas_path) {
                 if let Ok(schemas) = serde_json::from_str::<HashMap<String, SimilaritySchema>>(&data) {
                     eprintln!("Loaded {} similarity schemas", schemas.len());
-                    // Create embedders for loaded schemas
-                    for (name, schema) in &schemas {
-                        embedders.write().insert(
-                            name.clone(),
-                            Arc::new(StructuredEmbedder::new(schema.clone())),
-                        );
-                    }
                     *similarity_schemas.write() = schemas;
                 }
             }
@@ -115,7 +105,6 @@ impl StorageManager {
             collections,
             aliases,
             similarity_schemas,
-            embedders,
             data_dir,
             lmdb: Some(lmdb),
             wal: Some(wal),
@@ -184,7 +173,6 @@ impl StorageManager {
         // Also clean up similarity schema if it exists
         if removed {
             self.similarity_schemas.write().remove(name);
-            self.embedders.write().remove(name);
             let _ = self.save_similarity_schemas();
         }
         
@@ -256,7 +244,7 @@ impl StorageManager {
 
     // ==================== Similarity Schema Methods ====================
 
-    /// Set similarity schema for a collection
+    /// Set similarity schema for a collection (used for reranking)
     pub fn set_similarity_schema(&self, collection_name: &str, mut schema: SimilaritySchema) -> Result<()> {
         if !self.collection_exists(collection_name) {
             return Err(Error::CollectionNotFound(collection_name.to_string()));
@@ -265,10 +253,6 @@ impl StorageManager {
         // Validate and normalize the schema
         schema.validate_and_normalize()
             .map_err(|e| Error::Storage(e.to_string()))?;
-        
-        // Create and cache the embedder
-        let embedder = Arc::new(StructuredEmbedder::new(schema.clone()));
-        self.embedders.write().insert(collection_name.to_string(), embedder);
         
         // Store the schema
         self.similarity_schemas.write().insert(collection_name.to_string(), schema);
@@ -289,15 +273,9 @@ impl StorageManager {
         self.similarity_schemas.read().contains_key(collection_name)
     }
 
-    /// Get the structured embedder for a collection (if schema exists)
-    pub fn get_embedder(&self, collection_name: &str) -> Option<Arc<StructuredEmbedder>> {
-        self.embedders.read().get(collection_name).cloned()
-    }
-
     /// Delete similarity schema for a collection
     pub fn delete_similarity_schema(&self, collection_name: &str) -> Result<bool> {
         let removed = self.similarity_schemas.write().remove(collection_name).is_some();
-        self.embedders.write().remove(collection_name);
         
         if removed {
             self.save_similarity_schemas()?;
@@ -351,7 +329,6 @@ impl StorageManager {
         let collection = collections.get(collection_name)
             .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
 
-        // Build snapshot data from collection
         let points = collection.get_all_points();
 
         let snapshot_data = CollectionSnapshotData {
@@ -413,20 +390,16 @@ impl StorageManager {
 
     /// Recover collection from a URL
     pub async fn recover_from_url(&self, collection_name: &str, url: &str, checksum: Option<&str>) -> Result<Arc<Collection>> {
-        // Download snapshot
         let snapshot_path = self.snapshots.download_snapshot_from_url(collection_name, url, checksum)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        // Load and restore - use the target collection_name
         let snapshot_data = self.snapshots.load_snapshot_from_path(&snapshot_path)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         self.restore_collection_from_data_with_name(snapshot_data, Some(collection_name))
     }
 
-    /// Restore a collection from snapshot data
-    /// If target_name is provided, uses that as the collection name; otherwise uses the name from the snapshot
     fn restore_collection_from_data_with_name(&self, data: CollectionSnapshotData, target_name: Option<&str>) -> Result<Arc<Collection>> {
         let collection_name = target_name.unwrap_or(&data.name).to_string();
         
@@ -443,23 +416,19 @@ impl StorageManager {
             enable_bm25: data.config.enable_bm25,
         };
 
-        // Remove existing collection if present
         {
             let mut collections = self.collections.write();
             collections.remove(&collection_name);
         }
 
-        // Create new collection
         let collection = Arc::new(Collection::new(config));
 
-        // Restore points
         for point_data in data.points {
             let point_id = point_data.id.parse::<u64>()
                 .map(PointId::Integer)
                 .unwrap_or_else(|_| PointId::String(point_data.id.clone()));
 
             let point = if let Some(mv_data) = point_data.multivector {
-                // Create multivector from data
                 match MultiVector::new(mv_data) {
                     Ok(mv) => Point::new_multi(point_id, mv, point_data.payload),
                     Err(e) => {
@@ -480,18 +449,12 @@ impl StorageManager {
             }
         }
 
-        // Add to collections
         {
             let mut collections = self.collections.write();
             collections.insert(collection_name, collection.clone());
         }
 
         Ok(collection)
-    }
-
-    /// Restore a collection from snapshot data (uses original collection name from snapshot)
-    fn restore_collection_from_data(&self, data: CollectionSnapshotData) -> Result<Arc<Collection>> {
-        self.restore_collection_from_data_with_name(data, None)
     }
 
     /// List all snapshots
@@ -507,15 +470,12 @@ impl StorageManager {
         data: &[u8],
         filename: Option<&str>,
     ) -> Result<Arc<Collection>> {
-        // Save the uploaded data to a temporary snapshot file
         let snapshot_path = self.snapshots.save_uploaded_snapshot(collection_name, data, filename)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        // Load and restore - use the target collection_name (not the name from the snapshot)
         let snapshot_data = self.snapshots.load_snapshot_from_path(&snapshot_path)
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         self.restore_collection_from_data_with_name(snapshot_data, Some(collection_name))
     }
 }
-

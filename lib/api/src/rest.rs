@@ -5,7 +5,7 @@ use actix_multipart::Multipart;
 use chrono::Utc;
 use distx_core::{CollectionConfig, Collection, Distance, Point, PointId, Vector, PayloadFilter, FilterCondition, Filter, MultiVector};
 use distx_storage::StorageManager;
-use distx_schema::{SimilaritySchema, StructuredEmbedder, Reranker, ExplainedResult, SimilarResponse};
+use distx_schema::{SimilaritySchema, Reranker, ExplainedResult, SimilarResponse};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use std::path::Path;
@@ -670,16 +670,11 @@ async fn create_collection(
             _ => Distance::Cosine,
         };
         (vectors.size, dist)
-    } else if req.similarity_schema.is_some() {
-        // Similarity schema mode - vector dimension computed from schema
-        let schema = req.similarity_schema.as_ref().unwrap();
-        let embedder = StructuredEmbedder::new(schema.clone());
-        (embedder.vector_dim(), Distance::Cosine)
     } else if req.sparse_vectors.is_some() {
         // Sparse-only collection - use BM25 with default text dimension
         (0, Distance::Cosine)
     } else {
-        return Ok(qdrant_error("Either 'vectors', 'similarity_schema', or 'sparse_vectors' must be provided", start_time));
+        return Ok(qdrant_error("'vectors' configuration is required. Clients must provide embedding vectors.", start_time));
     };
 
     let config = CollectionConfig {
@@ -736,9 +731,6 @@ async fn upsert_points(
         }
     };
     
-    // Check if collection has a similarity schema for auto-embedding
-    let embedder = storage.get_embedder(&name);
-
     let points: Result<Vec<Point>, &str> = req.points.iter().map(|point_req| {
         let id = match &point_req.id {
             serde_json::Value::String(s) => PointId::String(s.clone()),
@@ -752,21 +744,10 @@ async fn upsert_points(
             _ => return Err("Invalid point ID"),
         };
 
-        // Determine if vector was provided or should be auto-embedded
+        // Vector is required - clients must provide embeddings
         let mut point = match &point_req.vector {
             Some(parsed_vector) => {
-                // Check if it's a placeholder vector (single zero)
-                let is_placeholder = parsed_vector.primary.len() == 1 && 
-                                     parsed_vector.primary[0] == 0.0 &&
-                                     parsed_vector.multivector.is_none() &&
-                                     parsed_vector.sparse_vectors.is_empty();
-                
-                if is_placeholder && embedder.is_some() && point_req.payload.is_some() {
-                    // Auto-embed using similarity schema
-                    let emb = embedder.as_ref().unwrap();
-                    let vector = emb.embed(point_req.payload.as_ref().unwrap());
-                    Point::new(id, vector, point_req.payload.clone())
-                } else if let Some(ref multivec_data) = parsed_vector.multivector {
+                if let Some(ref multivec_data) = parsed_vector.multivector {
                     // Create MultiVector and Point with multivector
                     match MultiVector::new(multivec_data.clone()) {
                         Ok(mv) => Point::new_multi(id, mv, point_req.payload.clone()),
@@ -782,17 +763,9 @@ async fn upsert_points(
                 }
             }
             None => {
-                // No vector provided - must auto-embed
-                if let Some(ref emb) = embedder {
-                    if let Some(ref payload) = point_req.payload {
-                        let vector = emb.embed(payload);
-                        Point::new(id, vector, point_req.payload.clone())
-                    } else {
-                        return Err("Either vector or payload with similarity schema is required");
-                    }
-                } else {
-                    return Err("Vector is required when collection has no similarity schema");
-                }
+                // No vector provided - use empty vector (for payload-only points)
+                let vector = Vector::new(vec![]);
+                Point::new(id, vector, point_req.payload.clone())
             }
         };
         
@@ -1230,26 +1203,60 @@ fn execute_simple_query(
 /// Parse Qdrant-style filter format (must/should/must_not)
 fn parse_filter(filter_json: &serde_json::Value) -> Option<FilterCondition> {
     if let Some(obj) = filter_json.as_object() {
-        // Qdrant-style filter with must/should/must_not
+        let mut all_conditions: Vec<FilterCondition> = Vec::new();
+        
+        // Qdrant-style filter with must (AND conditions)
         if let Some(must) = obj.get("must") {
             if let Some(arr) = must.as_array() {
-                // For simplicity, take first condition as the main filter
-                for cond in arr {
-                    if let Some(fc) = parse_field_condition(cond) {
-                        return Some(fc);
+                let must_conditions: Vec<FilterCondition> = arr.iter()
+                    .filter_map(parse_field_condition)
+                    .collect();
+                if !must_conditions.is_empty() {
+                    // Multiple must conditions are AND'd together
+                    if must_conditions.len() == 1 {
+                        all_conditions.push(must_conditions.into_iter().next().unwrap());
+                    } else {
+                        all_conditions.push(FilterCondition::And(must_conditions));
                     }
                 }
             }
         }
         
+        // Qdrant-style filter with should (OR conditions)
         if let Some(should) = obj.get("should") {
             if let Some(arr) = should.as_array() {
-                for cond in arr {
-                    if let Some(fc) = parse_field_condition(cond) {
-                        return Some(fc);
+                let should_conditions: Vec<FilterCondition> = arr.iter()
+                    .filter_map(parse_field_condition)
+                    .collect();
+                if !should_conditions.is_empty() {
+                    // Multiple should conditions are OR'd together
+                    if should_conditions.len() == 1 {
+                        all_conditions.push(should_conditions.into_iter().next().unwrap());
+                    } else {
+                        all_conditions.push(FilterCondition::Or(should_conditions));
                     }
                 }
             }
+        }
+        
+        // Qdrant-style filter with must_not (negated conditions)
+        if let Some(must_not) = obj.get("must_not") {
+            if let Some(arr) = must_not.as_array() {
+                for cond in arr {
+                    if let Some(fc) = parse_field_condition(cond) {
+                        all_conditions.push(FilterCondition::Not(Box::new(fc)));
+                    }
+                }
+            }
+        }
+        
+        // If we collected any conditions, combine them
+        if !all_conditions.is_empty() {
+            return if all_conditions.len() == 1 {
+                Some(all_conditions.into_iter().next().unwrap())
+            } else {
+                Some(FilterCondition::And(all_conditions))
+            };
         }
         
         // Legacy simple format: { field, value, operator }
@@ -3671,25 +3678,17 @@ async fn structured_similar(
         None => return Ok(qdrant_not_found("Collection not found", start_time)),
     };
     
-    // Get similarity schema
+    // Get similarity schema (required for reranking)
     let schema = match storage.get_similarity_schema(&name) {
         Some(s) => s,
         None => return Ok(qdrant_error("Collection does not have a similarity schema", start_time)),
     };
     
-    // Get embedder
-    let embedder = match storage.get_embedder(&name) {
-        Some(e) => e,
-        None => return Ok(qdrant_error("Embedder not found for collection", start_time)),
-    };
-    
     let limit = req.limit.unwrap_or(10);
     
-    // Determine the query payload
-    let query_payload = if let Some(ref example) = req.example {
-        example.clone()
-    } else if let Some(ref like_id) = req.like_id {
-        // Fetch the point by ID
+    // Determine query payload and optional query vector
+    let (query_payload, query_vector_opt) = if let Some(ref like_id) = req.like_id {
+        // Fetch the point by ID - use its vector and payload
         let point_id = match like_id {
             serde_json::Value::String(s) => s.clone(),
             serde_json::Value::Number(n) => n.to_string(),
@@ -3697,15 +3696,19 @@ async fn structured_similar(
         };
         
         match collection.get(&point_id) {
-            Some(point) => point.payload.unwrap_or(serde_json::json!({})),
+            Some(point) => {
+                let payload = point.payload.clone().unwrap_or(serde_json::json!({}));
+                let vector = point.vector.clone();
+                (payload, Some(vector))
+            }
             None => return Ok(qdrant_not_found("Point not found", start_time)),
         }
+    } else if let Some(ref example) = req.example {
+        // Example payload only - no vector search, pure structured reranking
+        (example.clone(), None)
     } else {
         return Ok(qdrant_error("Either 'example' or 'like_id' must be provided", start_time));
     };
-    
-    // Generate query vector
-    let query_vector = embedder.embed(&query_payload);
     
     // Build filter from constraints
     let filter: Option<PayloadFilter> = if let Some(ref constraints) = req.constraints {
@@ -3714,12 +3717,25 @@ async fn structured_similar(
         None
     };
     
-    // ANN search with more candidates for reranking
+    // Get candidates for reranking
     let candidates_limit = limit * 5;
-    let ann_results = if let Some(ref f) = filter {
-        collection.search(&query_vector, candidates_limit, Some(f))
+    let candidates: Vec<(Point, f32)> = if let Some(ref query_vector) = query_vector_opt {
+        // Use vector search to get candidates
+        if let Some(ref f) = filter {
+            collection.search(query_vector, candidates_limit, Some(f))
+        } else {
+            collection.search(query_vector, candidates_limit, None)
+        }
     } else {
-        collection.search(&query_vector, candidates_limit, None)
+        // No vector - get all points and filter, then score by structured similarity
+        let all_points = collection.get_all_points();
+        let filtered: Vec<Point> = if let Some(ref f) = filter {
+            all_points.into_iter().filter(|p| f.matches(p)).collect()
+        } else {
+            all_points
+        };
+        // Score of 0.0 since we'll rerank purely by structured similarity
+        filtered.into_iter().take(candidates_limit).map(|p| (p, 0.0)).collect()
     };
     
     // Create reranker with optional weight overrides
@@ -3729,8 +3745,8 @@ async fn structured_similar(
         Reranker::new(schema.clone())
     };
     
-    // Rerank candidates
-    let mut ranked_results = reranker.rerank(&query_payload, ann_results);
+    // Rerank candidates by structured similarity
+    let mut ranked_results = reranker.rerank(&query_payload, candidates);
     ranked_results.truncate(limit);
     
     // Convert to explained results

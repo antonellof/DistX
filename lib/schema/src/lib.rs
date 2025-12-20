@@ -1,108 +1,71 @@
 //! # DistX Schema
 //!
-//! **DistX does not store vectors that represent objects.
-//! It stores objects, and derives vectors from their structure.**
+//! Structured similarity layer for vector databases.
 //!
-//! This crate provides the Similarity Contract engine for DistX — a schema-driven
-//! approach to structured similarity search over tabular data.
+//! ## Overview
 //!
-//! ## The Similarity Contract
+//! DistX is a Qdrant-compatible vector database. The Schema module adds
+//! structured similarity scoring on top of vector search results.
 //!
-//! The schema is not just configuration — it's a **contract** that governs:
+//! **How it works:**
+//! 1. Client generates embeddings for text fields (OpenAI, Cohere, etc.)
+//! 2. Client sends vectors + payload to DistX
+//! 3. DistX performs vector search (ANN)
+//! 4. Schema reranks results using structured field comparisons
 //!
-//! - **Ingest**: How objects are converted to vectors (deterministic, reproducible)
-//! - **Query**: How similarity is computed across multiple field types
-//! - **Ranking**: How results are scored and ordered
-//! - **Explainability**: How each field contributes to the final score
+//! ## Use Cases
 //!
-//! ## What This Is NOT
+//! - **Product similarity**: Vector search finds semantically similar products,
+//!   schema reranks by price proximity, category match, availability
+//! - **Customer matching**: Vector search on profile text, schema scores by
+//!   industry match, company size, location
+//! - **Document search**: Vector search on content, schema weights by
+//!   date recency, author, document type
 //!
-//! DistX Schema is **not**:
-//! - A neural embedding model (no ML, no training, no drift)
-//! - A semantic LLM system (deterministic, not probabilistic)
-//! - A black-box recommender (fully explainable scores)
-//!
-//! It **is**:
-//! - A contract-based similarity engine for structured data
-//! - Deterministic and reproducible (same input → same output, always)
-//! - Designed for ERP, e-commerce, CRM, and tabular datasets
-//!
-//! ## Supported Field Types
-//!
-//! | Type | Distance Methods | Use Case |
-//! |------|-----------------|----------|
-//! | `text` | trigram hashing | Product names, descriptions |
-//! | `number` | relative, absolute | Prices, quantities, scores |
-//! | `categorical` | exact match hashing | Categories, brands, status |
-//! | `boolean` | equality | Flags, availability |
-//!
-//! ## Example
+//! ## Schema Definition
 //!
 //! ```rust
-//! use distx_schema::{SimilaritySchema, FieldConfig, DistanceType, StructuredEmbedder, Reranker};
+//! use distx_schema::{SimilaritySchema, FieldConfig, DistanceType};
 //! use std::collections::HashMap;
-//! use serde_json::json;
 //!
-//! // Define a Similarity Contract
 //! let mut fields = HashMap::new();
-//! fields.insert("name".to_string(), FieldConfig::text(0.5));
+//! // Text fields use vector search (no schema config needed for embedding)
+//! fields.insert("name".to_string(), FieldConfig::text(0.3));
+//! // Numeric fields use relative distance
 //! fields.insert("price".to_string(), FieldConfig::number(0.3, DistanceType::Relative));
+//! // Categorical fields use exact match
 //! fields.insert("category".to_string(), FieldConfig::categorical(0.2));
+//! fields.insert("availability".to_string(), FieldConfig::categorical(0.2));
 //!
-//! let mut schema = SimilaritySchema::new(fields);
-//! schema.validate_and_normalize().unwrap();
-//!
-//! // Derive vector from object structure
-//! let embedder = StructuredEmbedder::new(schema.clone());
-//! let payload = json!({
-//!     "name": "Prosciutto cotto",
-//!     "price": 1.99,
-//!     "category": "salumi"
-//! });
-//! let vector = embedder.embed(&payload);
-//!
-//! // Rerank with explainable scoring
-//! let reranker = Reranker::new(schema);
-//! // ... rerank ANN candidates with per-field scoring
+//! let schema = SimilaritySchema::new(fields);
 //! ```
 //!
-//! ## Architecture
+//! ## Reranking Flow
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                    SIMILARITY CONTRACT                          │
-//! │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐       │
-//! │  │   Schema    │────>│  Embedder   │────>│   Vector    │       │
-//! │  │ (contract)  │     │(deterministic)    │   Store     │       │
-//! │  └─────────────┘     └─────────────┘     └─────────────┘       │
-//! │        │                                        │               │
-//! │        │              ┌─────────────┐           │               │
-//! │        └─────────────>│  Reranker   │<──────────┘               │
-//! │                       │(structured) │                           │
-//! │                       └─────────────┘                           │
-//! │                              │                                  │
-//! │                       ┌─────────────┐                           │
-//! │                       │  Explain    │                           │
-//! │                       │(per-field)  │                           │
-//! │                       └─────────────┘                           │
-//! └─────────────────────────────────────────────────────────────────┘
+//! ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+//! │   Client    │────>│   DistX     │────>│  Reranker   │
+//! │ (embedding) │     │ (ANN search)│     │ (schema)    │
+//! └─────────────┘     └─────────────┘     └─────────────┘
+//!                                                │
+//!                                         ┌──────┴──────┐
+//!                                         │  Explained  │
+//!                                         │   Results   │
+//!                                         └─────────────┘
 //! ```
 
 pub mod schema;
 pub mod distance;
-pub mod embedder;
 pub mod rerank;
 pub mod explain;
 
-// Re-export main types for convenience
+// Re-export main types
 pub use schema::{
     SimilaritySchema, 
     FieldConfig, 
     FieldType, 
     DistanceType, 
-    EmbeddingType,
     SchemaError,
 };
-pub use embedder::{StructuredEmbedder, EmbedderBuilder, DEFAULT_TEXT_DIM, DEFAULT_CATEGORICAL_DIM};
 pub use rerank::{Reranker, RankedResult};
 pub use explain::{ExplainedResult, SimilarResponse, SimilarityStats, PointIdSer};

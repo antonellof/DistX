@@ -1,6 +1,6 @@
 [package]
 name = "distx-schema"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 rust-version = "1.75"
 description = "Schema-driven structured similarity for tabular data - the Similarity Contract engine for DistX"
@@ -19,7 +19,7 @@ thiserror = "1.0"
 ahash = "0.8"
 
 # Internal dependencies
-distx-core = { version = "0.2.6", path = "../core" }
+distx-core = { version = "0.2.7", path = "../core" }
 
 [dev-dependencies]
 tempfile = "3.0"
