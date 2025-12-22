@@ -67,7 +67,9 @@ const PureChatItem = ({
               className="cursor-pointer"
               onSelect={() => onShowCollectionInfo(chat.id)}
             >
-              <InfoIcon size={16} className="mr-2" />
+              <span className="mr-2 inline-flex">
+                <InfoIcon size={16} />
+              </span>
               <span>Collection Info</span>
             </DropdownMenuItem>
           )}
@@ -76,7 +78,9 @@ const PureChatItem = ({
               className="cursor-pointer"
               onSelect={() => onShowFiles(chat.id)}
             >
-              <FileIcon size={16} className="mr-2" />
+              <span className="mr-2 inline-flex">
+                <FileIcon size={16} />
+              </span>
               <span>Show Files ({fileCount})</span>
             </DropdownMenuItem>
           )}

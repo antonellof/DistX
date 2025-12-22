@@ -27,6 +27,16 @@ interface UploadResult {
   message?: string;
   error?: string;
   type?: "data" | "document";
+  file?: {
+    id: string;
+    filename: string;
+    type: "data" | "document";
+    size: number;
+    uploadedAt: string;
+    collectionName: string;
+    rowCount?: number;
+    chunkCount?: number;
+  };
 }
 
 interface UnifiedUploadProps {

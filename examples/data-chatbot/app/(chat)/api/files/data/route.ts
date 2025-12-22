@@ -178,7 +178,9 @@ export async function POST(request: Request) {
     // Generate embeddings for all data
     let embeddings: number[][] = [];
     try {
-      embeddings = await generatePayloadEmbeddings(data);
+      // Get all field names from the first row as text fields
+      const textFields = data.length > 0 ? Object.keys(data[0]) : [];
+      embeddings = await generatePayloadEmbeddings(data, textFields);
     } catch (error) {
       console.log("Embedding generation failed, using zero vectors:", error);
       const dim = getEmbeddingDimension();

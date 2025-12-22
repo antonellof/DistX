@@ -90,7 +90,16 @@ Use this when the user wants to:
 
       // Generate embeddings and prepare points
       debug("Generating embeddings", { count: data.length });
-      const points = await generatePayloadEmbeddings(data);
+      // Get all field names from the first row as text fields
+      const textFields = data.length > 0 ? Object.keys(data[0]) : [];
+      const embeddings = await generatePayloadEmbeddings(data, textFields);
+
+      // Prepare points with embeddings
+      const points = data.map((row, index) => ({
+        id: index + 1,
+        payload: row as PointPayload,
+        vector: embeddings[index],
+      }));
 
       // Insert points in batches
       const batchSize = 100;

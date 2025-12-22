@@ -150,7 +150,6 @@ export class vectXClient {
     options: {
       vectorSize: number;
       distance?: 'Cosine' | 'Euclidean' | 'Dot';
-      schema?: SimilaritySchema;
     }
   ): Promise<boolean> {
     const { vectorSize, distance = 'Cosine' } = options;
