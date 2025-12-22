@@ -1,0 +1,30 @@
+[package]
+name = "vectx-core"
+version = "0.2.7"
+edition = "2021"
+rust-version = "1.75"
+description = "Core library for vectX vector database - HNSW indexing, SIMD operations, BM25 search"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/vectX"
+documentation = "https://docs.rs/vectx-core"
+readme = "../../README.md"
+keywords = ["vector-database", "hnsw", "simd", "embeddings", "similarity-search"]
+categories = ["database", "data-structures", "algorithms"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+parking_lot = "0.12"
+ahash = "0.8"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+ordered-float = "5.0"
+smallvec = "1.15"
+rand = "0.9"
+rayon = "1.10"
+
+[dev-dependencies]
+tempfile = "3.0"
+

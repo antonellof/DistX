@@ -1,0 +1,55 @@
+services:
+  # vectX Vector Database
+  vectx:
+    image: antonellofratepietro/vectx:latest
+    container_name: vectx-chatbot
+    ports:
+      - "6333:6333"
+    volumes:
+      - vectx-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # PDF Parser Service (Python FastAPI)
+  pdf-parser:
+    build:
+      context: ./pdf-parser-service
+      dockerfile: Dockerfile
+    container_name: pdf-parser-service
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Data Chatbot (Next.js)
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - OPENAI_API_KEY=${OPENAI_API_KEY}
+        - VECTX_URL=http://vectx:6333
+    container_name: data-chatbot
+    ports:
+      - "3000:3000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VECTX_URL=http://vectx:6333
+      - PDF_PARSER_SERVICE_URL=http://pdf-parser:8000
+    depends_on:
+      vectx:
+        condition: service_healthy
+      pdf-parser:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  vectx-data:

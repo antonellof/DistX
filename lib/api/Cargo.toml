@@ -1,0 +1,35 @@
+[package]
+name = "vectx-api"
+version = "0.2.7"
+edition = "2021"
+rust-version = "1.75"
+description = "REST and gRPC API for vectX vector database - Qdrant-compatible endpoints"
+authors = ["antonellof"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antonellof/vectX"
+documentation = "https://docs.rs/vectx-api"
+keywords = ["vector-database", "rest-api", "grpc", "qdrant"]
+categories = ["database", "web-programming"]
+
+[dependencies]
+vectx-core = { version = "0.2.7", path = "../core" }
+vectx-storage = { version = "0.2.7", path = "../storage" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+actix-web = { version = "4.11", features = ["rustls-0_23"] }
+actix-cors = "0.7"
+actix-files = "0.6"
+actix-multipart = "0.7"
+tonic = { version = "0.11", features = ["gzip"] }
+prost = "0.12"
+prost-types = "0.12"
+futures-util = "0.3"
+chrono = "0.4"
+
+[build-dependencies]
+tonic-build = "0.11"
+bytes = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+

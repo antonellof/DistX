@@ -1,0 +1,637 @@
+syntax = "proto3";
+
+package vectx;
+option csharp_namespace = "Vectx.Client.Grpc";
+
+// ============================================================================
+// Main Services - Qdrant-compatible gRPC API
+// ============================================================================
+
+service Qdrant {
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckReply) {}
+}
+
+service Collections {
+  // Get detailed information about a collection
+  rpc Get (GetCollectionInfoRequest) returns (GetCollectionInfoResponse) {}
+  // Get list of all collections
+  rpc List (ListCollectionsRequest) returns (ListCollectionsResponse) {}
+  // Create new collection
+  rpc Create (CreateCollection) returns (CollectionOperationResponse) {}
+  // Update collection parameters
+  rpc Update (UpdateCollection) returns (CollectionOperationResponse) {}
+  // Delete collection
+  rpc Delete (DeleteCollection) returns (CollectionOperationResponse) {}
+  // Check if collection exists
+  rpc CollectionExists (CollectionExistsRequest) returns (CollectionExistsResponse) {}
+}
+
+service Points {
+  // Upsert points
+  rpc Upsert (UpsertPoints) returns (PointsOperationResponse) {}
+  // Delete points
+  rpc Delete (DeletePoints) returns (PointsOperationResponse) {}
+  // Get points by IDs
+  rpc Get (GetPoints) returns (GetResponse) {}
+  // Set payload for points
+  rpc SetPayload (SetPayloadPoints) returns (PointsOperationResponse) {}
+  // Delete payload keys from points
+  rpc DeletePayload (DeletePayloadPoints) returns (PointsOperationResponse) {}
+  // Clear all payload from points
+  rpc ClearPayload (ClearPayloadPoints) returns (PointsOperationResponse) {}
+  // Create field index
+  rpc CreateFieldIndex (CreateFieldIndexCollection) returns (PointsOperationResponse) {}
+  // Delete field index
+  rpc DeleteFieldIndex (DeleteFieldIndexCollection) returns (PointsOperationResponse) {}
+  // Search for similar points
+  rpc Search (SearchPoints) returns (SearchResponse) {}
+  // Scroll through points
+  rpc Scroll (ScrollPoints) returns (ScrollResponse) {}
+  // Recommend points
+  rpc Recommend (RecommendPoints) returns (RecommendResponse) {}
+  // Count points
+  rpc Count (CountPoints) returns (CountResponse) {}
+  // Universal query endpoint
+  rpc Query (QueryPoints) returns (QueryResponse) {}
+}
+
+service Snapshots {
+  // Create collection snapshot
+  rpc Create (CreateSnapshotRequest) returns (CreateSnapshotResponse) {}
+  // List collection snapshots
+  rpc List (ListSnapshotsRequest) returns (ListSnapshotsResponse) {}
+  // Delete snapshot
+  rpc Delete (DeleteSnapshotRequest) returns (DeleteSnapshotResponse) {}
+  // Recover from snapshot
+  rpc Recover (RecoverSnapshotRequest) returns (RecoverSnapshotResponse) {}
+}
+
+// ============================================================================
+// Common Messages
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckReply {
+  string title = 1;
+  string version = 2;
+  optional string commit = 3;
+}
+
+// Point ID - can be string or integer
+message PointId {
+  oneof point_id_options {
+    uint64 num = 1;
+    string uuid = 2;
+  }
+}
+
+// Vector data
+message Vector {
+  repeated float data = 1;
+}
+
+// Named vectors for multi-vector support
+message NamedVectors {
+  map<string, Vector> vectors = 1;
+}
+
+// Vector input - can be dense or named
+message VectorInput {
+  oneof variant {
+    Vector dense = 1;
+    NamedVectors named = 2;
+  }
+}
+
+// JSON value for payload
+message Value {
+  oneof kind {
+    double double_value = 1;
+    int64 integer_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+    ListValue list_value = 5;
+    Struct struct_value = 6;
+    NullValue null_value = 7;
+  }
+}
+
+message ListValue {
+  repeated Value values = 1;
+}
+
+message Struct {
+  map<string, Value> fields = 1;
+}
+
+enum NullValue {
+  NULL_VALUE = 0;
+}
+
+// ============================================================================
+// Collection Messages
+// ============================================================================
+
+message GetCollectionInfoRequest {
+  string collection_name = 1;
+}
+
+message GetCollectionInfoResponse {
+  CollectionInfo result = 1;
+  double time = 2;
+}
+
+message CollectionInfo {
+  CollectionStatus status = 1;
+  OptimizerStatus optimizer_status = 2;
+  uint64 vectors_count = 3;
+  uint64 indexed_vectors_count = 4;
+  uint64 points_count = 5;
+  uint64 segments_count = 6;
+  CollectionConfig config = 7;
+  map<string, PayloadIndexInfo> payload_schema = 8;
+}
+
+enum CollectionStatus {
+  UNKNOWN_STATUS = 0;
+  GREEN = 1;
+  YELLOW = 2;
+  RED = 3;
+  GREY = 4;
+}
+
+message OptimizerStatus {
+  bool ok = 1;
+  string error = 2;
+}
+
+message CollectionConfig {
+  VectorsConfig vectors = 1;
+  uint32 shard_number = 2;
+  uint32 replication_factor = 3;
+  HnswConfig hnsw_config = 4;
+  WalConfig wal_config = 5;
+  OptimizerConfig optimizer_config = 6;
+}
+
+message VectorsConfig {
+  oneof config {
+    VectorParams params = 1;
+    VectorParamsMap params_map = 2;
+  }
+}
+
+message VectorParams {
+  uint64 size = 1;
+  Distance distance = 2;
+  optional bool on_disk = 3;
+}
+
+message VectorParamsMap {
+  map<string, VectorParams> map = 1;
+}
+
+enum Distance {
+  UNKNOWN_DISTANCE = 0;
+  COSINE = 1;
+  EUCLID = 2;
+  DOT = 3;
+  MANHATTAN = 4;
+}
+
+message HnswConfig {
+  uint64 m = 1;
+  uint64 ef_construct = 2;
+  uint64 full_scan_threshold = 3;
+  optional uint64 max_indexing_threads = 4;
+  optional bool on_disk = 5;
+}
+
+message WalConfig {
+  uint64 wal_capacity_mb = 1;
+  uint64 wal_segments_ahead = 2;
+}
+
+message OptimizerConfig {
+  double deleted_threshold = 1;
+  uint64 vacuum_min_vector_number = 2;
+  uint64 default_segment_number = 3;
+  optional uint64 max_segment_size = 4;
+  optional uint64 memmap_threshold = 5;
+  uint64 indexing_threshold = 6;
+  uint64 flush_interval_sec = 7;
+}
+
+message PayloadIndexInfo {
+  PayloadSchemaType data_type = 1;
+  optional PayloadSchemaParams params = 2;
+  optional uint64 points = 3;
+}
+
+enum PayloadSchemaType {
+  UNKNOWN_TYPE = 0;
+  KEYWORD = 1;
+  INTEGER = 2;
+  FLOAT = 3;
+  GEO = 4;
+  TEXT = 5;
+  BOOL = 6;
+  DATETIME = 7;
+  UUID = 8;
+}
+
+message PayloadSchemaParams {
+  oneof params {
+    TextIndexParams text_index_params = 1;
+    IntegerIndexParams integer_index_params = 2;
+  }
+}
+
+message TextIndexParams {
+  TokenizerType tokenizer = 1;
+  optional uint64 min_token_len = 2;
+  optional uint64 max_token_len = 3;
+  optional bool lowercase = 4;
+}
+
+enum TokenizerType {
+  UNKNOWN_TOKENIZER = 0;
+  PREFIX = 1;
+  WHITESPACE = 2;
+  WORD = 3;
+  MULTILINGUAL = 4;
+}
+
+message IntegerIndexParams {
+  bool lookup = 1;
+  bool range = 2;
+}
+
+message ListCollectionsRequest {}
+
+message ListCollectionsResponse {
+  repeated CollectionDescription collections = 1;
+  double time = 2;
+}
+
+message CollectionDescription {
+  string name = 1;
+}
+
+message CreateCollection {
+  string collection_name = 1;
+  optional VectorsConfig vectors_config = 2;
+  optional uint32 shard_number = 3;
+  optional uint32 replication_factor = 4;
+  optional HnswConfig hnsw_config = 5;
+  optional WalConfig wal_config = 6;
+  optional OptimizerConfig optimizer_config = 7;
+}
+
+message UpdateCollection {
+  string collection_name = 1;
+  optional OptimizerConfig optimizer_config = 2;
+  optional CollectionParams params = 3;
+}
+
+message CollectionParams {
+  optional uint32 replication_factor = 1;
+  optional uint32 write_consistency_factor = 2;
+}
+
+message DeleteCollection {
+  string collection_name = 1;
+}
+
+message CollectionOperationResponse {
+  bool result = 1;
+  double time = 2;
+}
+
+message CollectionExistsRequest {
+  string collection_name = 1;
+}
+
+message CollectionExistsResponse {
+  CollectionExistsResult result = 1;
+  double time = 2;
+}
+
+message CollectionExistsResult {
+  bool exists = 1;
+}
+
+// ============================================================================
+// Points Messages
+// ============================================================================
+
+message UpsertPoints {
+  string collection_name = 1;
+  repeated PointStruct points = 3;
+  optional bool wait = 4;
+}
+
+message PointStruct {
+  PointId id = 1;
+  map<string, Value> payload = 3;
+  optional VectorInput vectors = 4;
+}
+
+message PointsOperationResponse {
+  UpdateResult result = 1;
+  double time = 2;
+}
+
+message UpdateResult {
+  uint64 operation_id = 1;
+  UpdateStatus status = 2;
+}
+
+enum UpdateStatus {
+  UNKNOWN_UPDATE_STATUS = 0;
+  ACKNOWLEDGED = 1;
+  COMPLETED = 2;
+}
+
+message DeletePoints {
+  string collection_name = 1;
+  PointsSelector points = 2;
+  optional bool wait = 3;
+}
+
+message PointsSelector {
+  oneof points_selector_one_of {
+    PointsIdsList points = 1;
+    Filter filter = 2;
+  }
+}
+
+message PointsIdsList {
+  repeated PointId ids = 1;
+}
+
+message GetPoints {
+  string collection_name = 1;
+  repeated PointId ids = 2;
+  optional WithPayloadSelector with_payload = 3;
+  optional WithVectorsSelector with_vectors = 4;
+}
+
+message WithPayloadSelector {
+  oneof selector_options {
+    bool enable = 1;
+    PayloadIncludeSelector include = 2;
+    PayloadExcludeSelector exclude = 3;
+  }
+}
+
+message PayloadIncludeSelector {
+  repeated string fields = 1;
+}
+
+message PayloadExcludeSelector {
+  repeated string fields = 1;
+}
+
+message WithVectorsSelector {
+  oneof selector_options {
+    bool enable = 1;
+    VectorsSelector include = 2;
+  }
+}
+
+message VectorsSelector {
+  repeated string names = 1;
+}
+
+message GetResponse {
+  repeated RetrievedPoint result = 1;
+  double time = 2;
+}
+
+message RetrievedPoint {
+  PointId id = 1;
+  map<string, Value> payload = 2;
+  optional VectorInput vectors = 3;
+}
+
+message SetPayloadPoints {
+  string collection_name = 1;
+  map<string, Value> payload = 2;
+  optional PointsSelector points_selector = 3;
+}
+
+message DeletePayloadPoints {
+  string collection_name = 1;
+  repeated string keys = 2;
+  optional PointsSelector points_selector = 3;
+}
+
+message ClearPayloadPoints {
+  string collection_name = 1;
+  PointsSelector points = 2;
+}
+
+message CreateFieldIndexCollection {
+  string collection_name = 1;
+  string field_name = 2;
+  optional PayloadSchemaType field_type = 3;
+  optional PayloadSchemaParams field_index_params = 4;
+}
+
+message DeleteFieldIndexCollection {
+  string collection_name = 1;
+  string field_name = 2;
+}
+
+// ============================================================================
+// Search Messages
+// ============================================================================
+
+message SearchPoints {
+  string collection_name = 1;
+  repeated float vector = 2;
+  optional Filter filter = 3;
+  uint64 limit = 4;
+  optional WithPayloadSelector with_payload = 5;
+  optional WithVectorsSelector with_vectors = 6;
+  optional float score_threshold = 7;
+  optional uint64 offset = 8;
+  optional string vector_name = 9;
+}
+
+message Filter {
+  repeated Condition must = 1;
+  repeated Condition should = 2;
+  repeated Condition must_not = 3;
+}
+
+message Condition {
+  oneof condition_one_of {
+    FieldCondition field = 1;
+    HasIdCondition has_id = 2;
+    Filter filter = 3;
+  }
+}
+
+message FieldCondition {
+  string key = 1;
+  Match match = 2;
+  Range range = 3;
+}
+
+message Match {
+  oneof match_value {
+    string keyword = 1;
+    int64 integer = 2;
+    bool boolean = 3;
+    RepeatedStrings keywords = 4;
+    RepeatedIntegers integers = 5;
+  }
+}
+
+message RepeatedStrings {
+  repeated string strings = 1;
+}
+
+message RepeatedIntegers {
+  repeated int64 integers = 1;
+}
+
+message Range {
+  optional double lt = 1;
+  optional double gt = 2;
+  optional double gte = 3;
+  optional double lte = 4;
+}
+
+message HasIdCondition {
+  repeated PointId has_id = 1;
+}
+
+message SearchResponse {
+  repeated ScoredPoint result = 1;
+  double time = 2;
+}
+
+message ScoredPoint {
+  PointId id = 1;
+  map<string, Value> payload = 2;
+  float score = 3;
+  optional VectorInput vectors = 4;
+  optional uint64 version = 5;
+}
+
+message ScrollPoints {
+  string collection_name = 1;
+  optional Filter filter = 2;
+  optional PointId offset = 3;
+  optional uint32 limit = 4;
+  optional WithPayloadSelector with_payload = 5;
+  optional WithVectorsSelector with_vectors = 6;
+}
+
+message ScrollResponse {
+  optional PointId next_page_offset = 1;
+  repeated RetrievedPoint result = 2;
+  double time = 3;
+}
+
+message RecommendPoints {
+  string collection_name = 1;
+  repeated PointId positive = 2;
+  repeated PointId negative = 3;
+  optional Filter filter = 4;
+  uint64 limit = 5;
+  optional WithPayloadSelector with_payload = 6;
+  optional WithVectorsSelector with_vectors = 7;
+  optional float score_threshold = 8;
+  optional uint64 offset = 9;
+}
+
+message RecommendResponse {
+  repeated ScoredPoint result = 1;
+  double time = 2;
+}
+
+message CountPoints {
+  string collection_name = 1;
+  optional Filter filter = 2;
+  optional bool exact = 3;
+}
+
+message CountResponse {
+  CountResult result = 1;
+  double time = 2;
+}
+
+message CountResult {
+  uint64 count = 1;
+}
+
+message QueryPoints {
+  string collection_name = 1;
+  optional VectorInput query = 2;
+  optional Filter filter = 3;
+  uint64 limit = 4;
+  optional WithPayloadSelector with_payload = 5;
+  optional WithVectorsSelector with_vectors = 6;
+  optional float score_threshold = 7;
+  optional uint64 offset = 8;
+}
+
+message QueryResponse {
+  repeated ScoredPoint result = 1;
+  double time = 2;
+}
+
+// ============================================================================
+// Snapshot Messages
+// ============================================================================
+
+message CreateSnapshotRequest {
+  string collection_name = 1;
+}
+
+message CreateSnapshotResponse {
+  SnapshotDescription result = 1;
+  double time = 2;
+}
+
+message SnapshotDescription {
+  string name = 1;
+  string creation_time = 2;
+  int64 size = 3;
+  optional string checksum = 4;
+}
+
+message ListSnapshotsRequest {
+  string collection_name = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated SnapshotDescription snapshots = 1;
+  double time = 2;
+}
+
+message DeleteSnapshotRequest {
+  string collection_name = 1;
+  string snapshot_name = 2;
+}
+
+message DeleteSnapshotResponse {
+  bool result = 1;
+  double time = 2;
+}
+
+message RecoverSnapshotRequest {
+  string collection_name = 1;
+  string location = 2;
+  optional string checksum = 3;
+}
+
+message RecoverSnapshotResponse {
+  bool result = 1;
+  double time = 2;
+}

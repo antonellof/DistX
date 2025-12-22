@@ -1,0 +1,9 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# Document parsing
+PyMuPDF>=1.23.0       # PDF extraction (best)
+pypdf>=3.0.0          # PDF extraction (fallback)
+python-docx>=0.8.11   # Word document extraction
