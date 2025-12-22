@@ -1,4 +1,4 @@
-# vectX
+# vectX Vector Database
 
 [![Crates.io](https://img.shields.io/crates/v/vectx.svg)](https://crates.io/crates/vectx)
 [![Docker](https://img.shields.io/docker/v/antonellofratepietro/vectx?label=docker)](https://hub.docker.com/r/antonellofratepietro/vectx)

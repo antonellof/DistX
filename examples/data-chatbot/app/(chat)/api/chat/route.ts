@@ -22,7 +22,7 @@ import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
 import { updateDocument } from "@/lib/ai/tools/update-document";
 // vectX data query tools
 import { importData, listDataCollections, exploreData } from "@/lib/ai/tools/import-data";
-import { findSimilar, findSimilarById, compareSimilarity } from "@/lib/ai/tools/find-similar";
+import { findSimilar } from "@/lib/ai/tools/find-similar";
 import { 
   vectorSearch, 
   textSearch, 
@@ -62,8 +62,6 @@ const loggedListDataCollections = wrapToolWithLogging('listDataCollections', lis
 const loggedFindSimilar = wrapToolWithLogging('findSimilar', findSimilar);
 const loggedExploreData = wrapToolWithLogging('exploreData', exploreData);
 const loggedImportData = wrapToolWithLogging('importData', importData);
-const loggedFindSimilarById = wrapToolWithLogging('findSimilarById', findSimilarById);
-const loggedCompareSimilarity = wrapToolWithLogging('compareSimilarity', compareSimilarity);
 // Vector search tools
 const loggedVectorSearch = wrapToolWithLogging('vectorSearch', vectorSearch);
 const loggedTextSearch = wrapToolWithLogging('textSearch', textSearch);
@@ -175,11 +173,21 @@ export async function POST(request: Request) {
             const collectionNames = await client.listCollections();
             for (const name of collectionNames) {
               const info = await client.getCollection(name);
-              const schema = await client.getSimilaritySchema(name);
-              if (info && schema) {
-                const fields: Record<string, { type: string; weight: number }> = {};
-                for (const [fieldName, config] of Object.entries(schema.fields)) {
-                  fields[fieldName] = { type: config.type, weight: config.weight };
+              if (info) {
+                // Get sample data to infer field types
+                const fields: Record<string, { type: string }> = {};
+                try {
+                  const { points } = await client.scrollPoints(name, { limit: 1 });
+                  if (points.length > 0 && points[0].payload) {
+                    for (const [fieldName, value] of Object.entries(points[0].payload)) {
+                      if (fieldName.startsWith('_')) continue; // Skip metadata fields
+                      fields[fieldName] = {
+                        type: typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : 'text',
+                      };
+                    }
+                  }
+                } catch (e) {
+                  // Ignore errors
                 }
                 collections.push({ name, rowCount: info.points_count || 0, fields });
               }
@@ -207,8 +215,6 @@ export async function POST(request: Request) {
                 "listDataCollections",
                 "exploreData",
                 "findSimilar",
-                "findSimilarById",
-                "compareSimilarity",
                 // Vector search tools
                 "vectorSearch",
                 "textSearch",
@@ -242,8 +248,6 @@ export async function POST(request: Request) {
             listDataCollections: loggedListDataCollections,
             exploreData: loggedExploreData,
             findSimilar: loggedFindSimilar,
-            findSimilarById: loggedFindSimilarById,
-            compareSimilarity: loggedCompareSimilarity,
             // Vector search tools
             vectorSearch: loggedVectorSearch,
             textSearch: loggedTextSearch,
